@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MISREMEMBERED MEDIA // Uncanny Reconstruction Engine</title>
+    <meta name="description" content="Liminal Space & Backrooms Media Reconstruction Engine. Distort audio, images, and videos with unnatural memory shifts.">
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=VT323&family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="styles.css">
+    <style id="mobileDrawerStyles">
+        /* --- SETTINGS DRAWER / DESKTOP & MOBILE FRIENDS --- */
+        .settings-toggle-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255, 51, 68, 0.18);
+            border: 1px solid rgba(255, 51, 68, 0.6);
+            color: #ff3344;
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 13px;
+            letter-spacing: 0.05em;
+            padding: 8px 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            flex-shrink: 0;
+            -webkit-tap-highlight-color: transparent;
+            position: relative !important;
+            z-index: 1000 !important;
+            pointer-events: auto !important;
+            transition: all 0.2s ease;
+        }
+        .settings-toggle-btn:hover {
+            background: rgba(255, 51, 68, 0.35);
+            border-color: #ff3344;
+            box-shadow: 0 0 12px rgba(255, 51, 68, 0.5);
+            color: #fff;
+        }
+
+        .upload-header-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(0, 255, 102, 0.15);
+            border: 1px solid rgba(0, 255, 102, 0.5);
+            color: #00ff66;
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 13px;
+            padding: 8px 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .upload-header-btn:hover {
+            background: rgba(0, 255, 102, 0.3);
+            border-color: #00ff66;
+            box-shadow: 0 0 12px rgba(0, 255, 102, 0.4);
+            color: #fff;
+        }
+
+        .crt-overlay, .vignette-overlay {
+            pointer-events: none !important;
+        }
+
+        .drawer-backdrop {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 998;
+            opacity: 0;
+            transition: opacity 0.25s ease;
+            pointer-events: none;
+        }
+        
+        @media (max-width: 860px) {
+            .drawer-backdrop.open {
+                display: block !important;
+                opacity: 1;
+                pointer-events: auto !important;
+            }
+        }
+
+        #controlPanel.control-panel {
+            display: block !important;
+            visibility: visible !important;
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: auto !important;
+            bottom: auto !important;
+            height: 100vh !important;
+            max-height: 100vh !important;
+            width: min(380px, 92vw) !important;
+            max-width: 92vw !important;
+            margin: 0 !important;
+            overflow-y: auto !important;
+            -webkit-overflow-scrolling: touch;
+            touch-action: pan-y;
+            z-index: 9999 !important;
+            transform: translateX(-105%) !important;
+            transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1) !important;
+            box-shadow: 8px 0 32px rgba(0,0,0,0.85);
+            pointer-events: auto !important;
+            background: rgba(8, 12, 18, 0.96);
+            border-right: 1px solid rgba(255, 51, 68, 0.4);
+            padding-bottom: 2rem;
+        }
+        #controlPanel.control-panel.drawer-open {
+            transform: translateX(0) !important;
+        }
+
+        .drawer-close-btn {
+            position: sticky;
+            top: 0;
+            width: 100%;
+            text-align: right;
+            background: rgba(8, 12, 18, 0.95);
+            border: none;
+            border-bottom: 1px dashed rgba(255, 51, 68, 0.4);
+            color: #ff3344;
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 14px;
+            padding: 12px 16px;
+            cursor: pointer;
+            z-index: 10;
+        }
+        .drawer-close-btn:hover {
+            color: #fff;
+            background: rgba(255, 51, 68, 0.25);
+        }
+
+        .main-grid {
+            display: block !important;
+        }
+
+        html, body {
+            overflow-x: hidden;
+            max-width: 100vw;
+        }
+        .app-wrapper {
+            max-width: 100vw;
+        }
+
+        @media (max-width: 860px) {
+            .app-wrapper {
+                padding-left: 10px !important;
+                padding-right: 10px !important;
+            }
+            .terminal-header {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            .brand h1.glitch-text {
+                font-size: 20px !important;
+            }
+            .version-tag {
+                font-size: 10px !important;
+            }
+            .system-status {
+                flex-wrap: wrap;
+                gap: 8px;
+                width: 100%;
+            }
+            .status-metric {
+                font-size: 11px !important;
+            }
+            .monitor-header {
+                flex-wrap: wrap;
+                gap: 4px;
+            }
+            .canvas-container {
+                width: 100%;
+            }
+            canvas#glitchCanvas {
+                max-width: 100%;
+                width: 100% !important;
+                height: auto !important;
+            }
+            .monitor-controls {
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+            .timeline-container {
+                order: 10;
+                width: 100%;
+            }
+            .telemetry-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+    </style>
+</head>
+<body class="crt-flicker">
+
+    <div class="crt-overlay"></div>
+    <div class="vignette-overlay"></div>
+    <div class="drawer-backdrop" id="drawerBackdrop"></div>
+
+    <div class="app-wrapper">
+        <!-- HEADER / BACKROOMS ASYNC TERMINAL BANNER -->
+        <header class="terminal-header backrooms-mri-header">
+            <div class="brand">
+                <span class="status-indicator active pulse"></span>
+                <h1 class="glitch-text" data-text="MISREMEMBERED MEDIA">MISREMEMBERED MEDIA</h1>
+                <span class="version-tag">ASYNC UNIT 04 // RECONSTRUCTION DECAY</span>
+            </div>
+            
+            <button id="btnToggleSettings" class="settings-toggle-btn" type="button">
+                <span class="icon">⚙</span> DISTORTION KNOBS
+            </button>
+
+            <div class="system-status">
+                <div class="status-metric">
+                    <span class="metric-label">INTEGRITY:</span>
+                    <span class="metric-value unstable-text" id="stabilityDisplay">15.1% [DECAYING]</span>
+                </div>
+                <div class="status-metric">
+                    <span class="metric-label">SIGNAL:</span>
+                    <span class="metric-value active-text" id="entityStatus">RECONSTRUCTING</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN LAYOUT GRID -->
+        <main class="main-grid">
+            
+            <!-- LEFT CONTROL PANEL (Off-canvas drawer, opened via SETTINGS button) -->
+            <aside class="control-panel" id="controlPanel">
+                <button id="btnCloseSettings" class="drawer-close-btn" type="button">✕ CLOSE CONTROLS</button>
+                
+                <!-- PROTOCOL HEADER -->
+                <div class="panel-section protocol-banner-section">
+                    <h2 class="protocol-title"><span class="icon">📼</span> RECONSTRUCTION UNIT</h2>
+                    <p class="protocol-desc">something tried to remember this. it didn't get it right. the edges are wrong. the sound is close but not quite. keep watching.</p>
+                </div>
+
+                <!-- SOUND MEMORY -->
+                <div class="panel-section">
+                    <h2 class="section-title"><span class="icon">📻</span> SOUND MEMORY</h2>
+                    
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="masterIntensity">how wrong it sounds</label>
+                            <span class="value-badge" id="masterIntensityVal">85%</span>
+                        </div>
+                        <input type="range" id="masterIntensity" min="0" max="100" value="85" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="audioDropouts">the parts it forgot</label>
+                            <span class="value-badge" id="audioDropoutsVal">Frequent Silence</span>
+                        </div>
+                        <input type="range" id="audioDropouts" min="0" max="100" value="60" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="pitchDrift">voice coming through wrong</label>
+                            <span class="value-badge" id="pitchDriftVal">±24 semitones</span>
+                        </div>
+                        <input type="range" id="pitchDrift" min="0" max="100" value="65" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="spatialTeleport">where the sound thinks it is</label>
+                            <span class="value-badge" id="spatialTeleportVal">Rapid Orbit</span>
+                        </div>
+                        <input type="range" id="spatialTeleport" min="0" max="100" value="50" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="compressionDistort">tape damage</label>
+                            <span class="value-badge" id="compressionDistortVal">Metallic</span>
+                        </div>
+                        <input type="range" id="compressionDistort" min="0" max="100" value="35" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="phonemeStutter">words said twice, slightly wrong</label>
+                            <span class="value-badge" id="phonemeStutterVal">Heavy Multiphonic</span>
+                        </div>
+                        <input type="range" id="phonemeStutter" min="0" max="100" value="40" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="entityWhispers">something else breathing</label>
+                            <span class="value-badge" id="entityWhispersVal">80% [ACTIVE]</span>
+                        </div>
+                        <input type="range" id="entityWhispers" min="0" max="100" value="40" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="liminalReverb">room that shouldn't be there</label>
+                            <span class="value-badge" id="liminalReverbVal">85% [CAVERN]</span>
+                        </div>
+                        <input type="range" id="liminalReverb" min="0" max="100" value="45" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="audioGainBoost">how loud the memory is</label>
+                            <span class="value-badge" id="audioGainBoostVal">150% [COMP]</span>
+                        </div>
+                        <input type="range" id="audioGainBoost" min="50" max="250" value="105" class="slider">
+                    </div>
+                </div>
+
+                <!-- VISUAL MEMORY -->
+                <div class="panel-section">
+                    <h2 class="section-title"><span class="icon">🪟</span> WHAT IT SAW</h2>
+                    
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="flawedMirroring">geometry that doesn't fold right</label>
+                            <span class="value-badge" id="flawedMirroringVal">Heavy Mirrors</span>
+                        </div>
+                        <input type="range" id="flawedMirroring" min="0" max="100" value="80" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="chromaticAberration">colour bleeding at the edges</label>
+                            <span class="value-badge" id="chromaticVal">28px</span>
+                        </div>
+                        <input type="range" id="chromaticAberration" min="0" max="60" value="28" class="slider">
+                    </div>
+
+                    <div class="control-group">
+                        <div class="control-header">
+                            <label for="pixelSlice">tape head skipping</label>
+                            <span class="value-badge" id="pixelSliceVal">Severe</span>
+                        </div>
+                        <input type="range" id="pixelSlice" min="0" max="100" value="75" class="slider">
+                    </div>
+
+                    <div class="toggle-group">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggleObjectMelt" checked>
+                            <span class="toggle-slider"></span>
+                            <span class="toggle-label">faces that aren't quite right</span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-group">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggleMisrememberedText" checked>
+                            <span class="toggle-slider"></span>
+                            <span class="toggle-label">text it got wrong</span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-group">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggleInvertFlash" checked>
+                            <span class="toggle-slider"></span>
+                            <span class="toggle-label">the flash before it cuts out</span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-group">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggleJitterUI" checked>
+                            <span class="toggle-slider"></span>
+                            <span class="toggle-label">something shaking slightly</span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-group">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="toggleMemoryDegrading">
+                            <span class="toggle-slider"></span>
+                            <span class="toggle-label">memory degrading (gets worse over time)</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- DEMO BUTTON -->
+                <div class="panel-section">
+                    <button id="btnSynthesizeDemo" class="btn-secondary">
+                        <span class="icon">⚡</span> try to remember something
+                    </button>
+                </div>
+            </aside>
+
+            <!-- CENTER/RIGHT DISPLAY & MEDIA VIEWPORT -->
+            <section class="viewport-section">
+                
+                <!-- MONITOR SCREEN FRAME -->
+                <div class="monitor-frame" id="monitorFrame">
+                    <div class="monitor-header">
+                        <span class="mon-title" id="mediaTitle">MONITORING: [NO MEDIA LOADED]</span>
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                            <span class="mon-coord" id="spatialCoords">PAN X: 0.00 | PAN Y: 0.00</span>
+                            <span style="font-family:'Share Tech Mono',monospace;font-size:11px;color:rgba(255,179,0,0.85);letter-spacing:0.05em;" id="seedDisplay">SEED: --------</span>
+                            <input id="seedInput" type="text" maxlength="8" placeholder="HEX SEED" title="Type a hex seed to lock output (e.g. DEADBEEF)"
+                                style="font-family:'Share Tech Mono',monospace;font-size:11px;background:#0a0908;border:1px solid rgba(255,179,0,0.4);color:#ffb300;padding:3px 7px;width:90px;outline:none;letter-spacing:1px;">
+                            <button id="btnRegenerateSeed" type="button" style="font-family:'Share Tech Mono',monospace;font-size:11px;background:rgba(255,179,0,0.12);border:1px solid rgba(255,179,0,0.5);color:#ffb300;padding:3px 9px;cursor:pointer;" title="Apply typed seed or generate new random seed">↻ SET SEED</button>
+                        </div>
+                    </div>
+
+                    <!-- DROP ZONE / SCREEN CONTAINER -->
+                    <div class="canvas-container" id="dropZone">
+                        
+                        <!-- UPLOAD PLACEHOLDER OVERLAY -->
+                        <div class="upload-placeholder" id="uploadPlaceholder">
+                            <div class="upload-icon-pulse">
+                                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <path d="M12 16V4m0 0l-5 5m5-5l5 5"/>
+                                    <path d="M20 16.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-1.5"/>
+                                </svg>
+                            </div>
+                            <h3>give it something to remember</h3>
+                            <p>.MP4  .AVI  .MKV  .MOV  .MP3  .WAV  .PNG  .JPG</p>
+                            <span class="upload-subtext">or click to find the file</span>
+                        </div>
+
+                        <!-- HIDDEN FILE INPUT (Used for file browsing) -->
+                        <input type="file" id="fileInput" accept="image/*,video/*,audio/*,.avi,.mkv,.mov,.mp4,.m4v,.3gp,.qt,.mp3,.wav,.m4a" class="hidden-file-input">
+
+                        <div class="processing-overlay" id="processingOverlay" style="display: none;">
+                            <div class="processing-box">
+                                <div class="spinner-pulse"></div>
+                                <h3 id="processingTitle">PROCESSING ENTIRE FILE...</h3>
+                                <p id="processingSubtitle">Recording in real-time — video plays through once</p>
+                                <div class="progress-bar-bg">
+                                    <div class="progress-bar-fill" id="processingProgressBar"></div>
+                                </div>
+                                <span class="processing-percent" id="processingPercentText">0%</span>
+                                <span style="font-family:'Share Tech Mono',monospace;font-size:11px;color:rgba(255,179,0,0.8);margin-top:6px;display:block;" id="processingTimeText"></span>
+                            </div>
+                        </div>
+
+                        <!-- MAIN DISPLAY CANVAS -->
+                        <canvas id="glitchCanvas"></canvas>
+
+                        <!-- HIDDEN VIDEO / AUDIO SOURCE ELEMENTS FOR PROCESSING -->
+                        <video id="sourceVideo" playsinline loop class="source-element"></video>
+                        <audio id="sourceAudio" class="source-element"></audio>
+                        <img id="sourceImage" class="source-element">
+                    </div>
+
+                    <!-- MONITOR FOOTER & PLAYBACK BAR -->
+                    <div class="monitor-controls">
+                        <!-- UPLOAD NEW FILE BUTTON IN MONITOR BAR -->
+                        <button id="btnUploadControl" class="btn-control" type="button" style="border-color: rgba(0, 255, 102, 0.5); color: #00ff66;">
+                            <span class="icon">📁</span> feed it a file
+                        </button>
+
+                        <button id="btnPlayPause" class="btn-control" disabled>
+                            <span class="icon" id="playIcon">▶</span> <span id="playText">PLAY</span>
+                        </button>
+                        
+                        <div class="timeline-container">
+                            <span id="currentTime" class="time-readout">00:00</span>
+                            <input type="range" id="seekSlider" min="0" max="100" value="0" class="slider seek-slider" disabled>
+                            <span id="durationTime" class="time-readout">00:00</span>
+                        </div>
+
+                        <button id="btnMute" class="btn-control icon-only" disabled title="Mute/Unmute">
+                            🔊
+                        </button>
+
+                        <button id="btnSnapshotImage" class="btn-control" disabled title="Save Current Frame">
+                            📸 CAPTURE
+                        </button>
+
+                        <button id="btnProcessFullFile" class="btn-primary-action" disabled>
+                            <span class="icon">💾</span> RENDER THE MEMORY
+                        </button>
+                    </div>
+                </div>
+
+                <!-- PREVIEW & DOWNLOAD CARD -->
+                <div class="preview-card" id="previewCard" style="display: none;">
+                    <div class="preview-header">
+                        <span class="preview-title">MISREMEMBERED PAYLOAD READY</span>
+                        <button id="btnClosePreview" class="btn-close">✕</button>
+                    </div>
+                    <div class="preview-body">
+                        <div class="preview-media-container" id="previewMediaContainer">
+                        </div>
+                        <div class="preview-actions">
+                            <a id="btnDownloadPayload" class="btn-download" download="MISREMEMBERED_ANOMALY.webm">
+                                💾 SAVE DISTORTED FILE TO COMPUTER
+                            </a>
+                            <span class="preview-subtext" id="previewSubtext">Full file processed with audio pitch drift, feature duplication & reality shifts.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- READOUT PANELS -->
+                <div class="telemetry-grid">
+                    <div class="telemetry-card">
+                        <div class="telemetry-title">AUDIO — what it sounds like now</div>
+                        <canvas id="audioSpectrumCanvas" height="80"></canvas>
+                    </div>
+                    
+                    <div class="telemetry-card">
+                        <div class="telemetry-title">spatial drift</div>
+                        <div class="radar-box">
+                            <canvas id="spatialRadarCanvas" width="120" height="80"></canvas>
+                            <div class="radar-info">
+                                <div id="radarTargetText">TARGET: ORBITING</div>
+                                <div id="pitchFreqText">PITCH SHIFT: 0.0 st</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- LOG FEED -->
+                <div class="log-terminal">
+                    <div class="terminal-bar">
+                        <span>what it remembers</span>
+                        <span>LOG_LEVEL: MEMORY_DECAY</span>
+                    </div>
+                    <div class="log-content" id="logContent">
+                        <div class="log-entry">[00:00:00] unit online. waiting for something to reconstruct.</div>
+                        <div class="log-entry danger">[00:00:01] warning — memory integrity below threshold. drift protocols active.</div>
+                    </div>
+                </div>
+
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+
+    <!-- BACKROOMS UI MISREMEMBERING: the interface itself occasionally gets it wrong -->
+    <script>
+    (function() {
+        // Labels/headings the UI can misremember into
+        const corruptions = [
+            ['how wrong it sounds',      ['how wrong it s0unds', 'how wrong it       sounds', 'HOW WRONG IT SOUDNS', 'how wron g it sounds']],
+            ['the parts it forgot',      ['the parts it f0rgot', 'the  parts it forgot', 'the parts it forgot.', 'THE PARTS IT FORGOT']],
+            ['voice coming through wrong',['voice c0ming through wrong', 'v o i c e  c o m i n g  w r o n g', 'voice coming through wr0ng']],
+            ['room that shouldn\'t be there', ['r00m that shouldn\'t be there', 'room that shouldn t be there', 'room that shouldn\'t be  there']],
+            ['faces that aren\'t quite right', ['faces that arent quite right', 'f a c e s  t h a t  a r e n t', 'faces that arent quite  right']],
+            ['text it got wrong',         ['tEXT it got wrong', 'text it g0t wrong', 't e x t  i t  g o t  w r o n g']],
+            ['something else breathing',  ['something else  breathing', 's0mething else breathing', 'SOMETHING ELSE BREATHING']],
+            ['give it something to remember', ['give it something to  remember', 'give  it something to remember', 'GIVE IT SOMETHING TO REMEMBER']],
+            ['geometry that doesn\'t fold right', ['ge0metry that doesn\'t fold right', 'geometry that doesnt fold right']],
+            ['tape head skipping',        ['tape h3ad skipping', 't a p e  h e a d  s k i p p i n g']],
+            ['tape damage',               ['t4pe damage', 'tape  damage', 'TAPE DAMAGE']],
+            ['words said twice, slightly wrong', ['words said twice  slightly wrong', 'words said tw1ce, slightly wrong']],
+            ['colour bleeding at the edges', ['colour bl3eding at the edges', 'c o l o u r  b l e e d i n g']],
+            ['where the sound thinks it is', ['where the s0und thinks it is', 'where the sound  thinks it is']],
+            ['how loud the memory is',    ['how l0ud the memory is', 'how loud the mem0ry is']],
+            ['something shaking slightly', ['something sh4king slightly', 's o m e t h i n g  s h a k i n g']],
+            ['the flash before it cuts out', ['the fl4sh before it cuts out', 'the flash before it cuts  out']],
+            ['what it saw',               ['what it s4w', 'wh4t it saw', 'W H A T  I T  S A W']],
+            ['sound memory',              ['s0und memory', 'sound  memory', 'S O U N D  M E M O R Y']],
+            ['reconstruction unit',       ['rec0nstruction unit', 'r e c o n s t r u c t i o n', 'RECONSTRUCTION UN1T']],
+            ['something tried to remember this',  ['something tr1ed to remember this', 'something tried to remember  this']],
+        ];
+
+        function corruptText(el, wrongVer) {
+            const original = el.textContent;
+            el.setAttribute('data-original-ui-text', original);
+            el.style.color = 'rgba(230, 200, 80, 0.65)';
+            el.textContent = wrongVer;
+            setTimeout(() => {
+                el.textContent = original;
+                el.style.color = '';
+            }, 800 + Math.random() * 1400);
+        }
+
+        function runUIMisremember() {
+            // Collect all labels in the panel
+            const labels = Array.from(document.querySelectorAll('label, .section-title, .telemetry-title, .protocol-desc, .protocol-title, h3, .upload-subtext'));
+            if (!labels.length) return;
+
+            // Pick 1-2 random labels
+            const count = 1 + Math.floor(Math.random() * 2);
+            for (let i = 0; i < count; i++) {
+                const el = labels[Math.floor(Math.random() * labels.length)];
+                const text = el.textContent.trim().toLowerCase();
+                const match = corruptions.find(c => text.includes(c[0]));
+                if (match) {
+                    const alts = match[1];
+                    corruptText(el, alts[Math.floor(Math.random() * alts.length)]);
+                }
+            }
+
+            // Occasionally (10% chance) briefly corrupt the h1 title too
+            if (Math.random() < 0.10) {
+                const h1 = document.querySelector('h1.glitch-text');
+                if (h1) {
+                    const titles = ['MISREMEMBERED MEDIA', 'MISREMEM8ERED  MEDIA', 'M I S R E M E M B E R E D', 'MISREMBERED MEDIA', 'MlSREMEMBERED MEDlA', 'MISREMEMBERED  M̷E̷D̷I̷A̷'];
+                    const bad = titles[1 + Math.floor(Math.random() * (titles.length - 1))];
+                    const orig = h1.textContent;
+                    h1.textContent = bad;
+                    setTimeout(() => { h1.textContent = orig; }, 400 + Math.random() * 600);
+                }
+            }
+
+            // Schedule next misremembering: every 4-12 seconds
+            setTimeout(runUIMisremember, 4000 + Math.random() * 8000);
+        }
+
+        // Start after 6s so page feels stable at first
+        setTimeout(runUIMisremember, 6000);
+    })();
+    </script>
+</body>
+</html>
