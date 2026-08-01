@@ -694,6 +694,7 @@ document.addEventListener('DOMContentLoaded', () => {
         createWhisperSynthesizer();
 
         streamDestination = audioCtx.createMediaStreamDestination();
+        preloadEmgBuffer();
         addLog('UNCANNY AUDIO ENGINE: Pitch intervals (20%/45%/35%), periodic reverb, memory whisper online.', 'normal');
     }
 
@@ -1522,31 +1523,60 @@ document.addEventListener('DOMContentLoaded', () => {
             noSignalAudioEl.currentTime = 0;
             noSignalAudioEl = null;
         }
+        if (noSignalAudioSourceNode) {
+            try { noSignalAudioSourceNode.stop(); } catch(e) {}
+            try { noSignalAudioSourceNode.disconnect(); } catch(e) {}
+            noSignalAudioSourceNode = null;
+        }
         // Unmute video audio element and restore gain level
         if (sourceVideo) sourceVideo.muted = false;
         if (mainGainNode && audioCtx) mainGainNode.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.15);
     }
 
     let noSignalAudioSourceNode = null;
+    let emgAudioBuffer = null;
+
+    // Pre-fetch emg.mp3 into an AudioBuffer so it can be routed into streamDestination reliably
+    async function preloadEmgBuffer() {
+        if (emgAudioBuffer || !audioCtx) return;
+        try {
+            const resp = await fetch('emg.mp3');
+            const arrayBuf = await resp.arrayBuffer();
+            emgAudioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+        } catch(e) {
+            console.error('[EMG PRELOAD ERR]', e);
+        }
+    }
+
     function playNoSignalMusic() {
         if (!audioCtx) return;
+        stopNoSignalMusic();
+
+        // 1. Live preview fallback using HTML Audio element
         try {
             noSignalAudioEl = new Audio('emg.mp3');
             noSignalAudioEl.volume = 1.0;
             noSignalAudioEl.loop = true;
-            noSignalAudioEl.play().then(() => {
-                if (audioCtx && !noSignalAudioSourceNode) {
-                    try {
-                        noSignalAudioSourceNode = audioCtx.createMediaElementSource(noSignalAudioEl);
-                        const gain = audioCtx.createGain();
-                        gain.gain.value = 1.85; // 2.5x gain boost so EMG audio is loud & punchy
-                        noSignalAudioSourceNode.connect(gain);
-                        gain.connect(audioCtx.destination);
-                        if (streamDestination) gain.connect(streamDestination);
-                    } catch(e) {}
-                }
-            }).catch(() => {});
+            noSignalAudioEl.play().catch(() => {});
         } catch(e) {}
+
+        // 2. Direct Web Audio API node routing into streamDestination (FOR EXPORT RECORDING)
+        if (emgAudioBuffer) {
+            try {
+                const bufSource = audioCtx.createBufferSource();
+                bufSource.buffer = emgAudioBuffer;
+                bufSource.loop = true;
+                const gain = audioCtx.createGain();
+                gain.gain.value = 1.85; // 2.5x gain boost so EMG audio is loud & punchy
+                bufSource.connect(gain);
+                gain.connect(audioCtx.destination);
+                if (streamDestination) gain.connect(streamDestination);
+                bufSource.start();
+                noSignalAudioSourceNode = bufSource;
+            } catch(e) {}
+        } else {
+            preloadEmgBuffer();
+        }
     }
 
     // Render a low-quality degraded no_signal blue screen
