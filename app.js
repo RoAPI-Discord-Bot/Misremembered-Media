@@ -1098,11 +1098,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // 5. SPEED WOBBLE: rapid micro-stutters in playback rate (separate from pitch events)
-        const el = mediaType === 'video' ? sourceVideo : sourceAudio;
-        if (el && masterVal > 0.5 && Math.random() < 0.018 * masterVal) {
+        const wobbleEl = mediaType === 'video' ? sourceVideo : sourceAudio;
+        if (wobbleEl && masterVal > 0.5 && Math.random() < 0.018 * masterVal) {
             const wobbleRate = currentPitchBend * (0.75 + Math.random() * 0.55);
-            el.playbackRate = Math.max(0.1, Math.min(2.8, wobbleRate));
-            setTimeout(() => { if (el) el.playbackRate = Math.max(0.25, Math.min(2.2, currentPitchBend)); }, 80 + Math.random() * 160);
+            wobbleEl.playbackRate = Math.max(0.1, Math.min(2.8, wobbleRate));
+            setTimeout(() => { if (wobbleEl) wobbleEl.playbackRate = Math.max(0.25, Math.min(2.2, currentPitchBend)); }, 80 + Math.random() * 160);
         }
 
         // 3D Spatial Rotation
@@ -1951,13 +1951,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 // Speed collapse: playback rate becomes erratic, slows to crawl then spikes
-                const el = mediaType === 'video' ? sourceVideo : sourceAudio;
-                if (el && Math.random() < 0.06 + collapseIntensity * 0.35) {
+                const collapseEl = mediaType === 'video' ? sourceVideo : sourceAudio;
+                if (collapseEl && Math.random() < 0.06 + collapseIntensity * 0.35) {
                     const collapseRate = collapseIntensity > 0.6
                         ? (Math.random() < 0.5 ? 0.05 + Math.random() * 0.2 : 1.8 + Math.random() * 1.2)
                         : currentPitchBend * (0.5 + Math.random() * 0.9);
-                    el.playbackRate = Math.max(0.05, Math.min(3.0, collapseRate));
-                    setTimeout(() => { if (el) el.playbackRate = Math.max(0.25, Math.min(2.2, currentPitchBend)); }, 60 + Math.random() * 200);
+                    collapseEl.playbackRate = Math.max(0.05, Math.min(3.0, collapseRate));
+                    setTimeout(() => { if (collapseEl) collapseEl.playbackRate = Math.max(0.25, Math.min(2.2, currentPitchBend)); }, 60 + Math.random() * 200);
                 }
 
                 // Distortion curve: maxed hard clip at full collapse
