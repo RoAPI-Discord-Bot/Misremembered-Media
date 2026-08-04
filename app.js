@@ -386,20 +386,31 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // Visual interrupt events: no_video, static, no_signal
-        // Spaced every 28-48s (max 1-2 interrupts per 90-second video)
+        // Visual interrupt events: no_video, static, no_signal, complex_generated
+        // Spaced every 24-42s
         t = 12;
         while (t < duration - 10) {
-            t += 28 + rng() * 20;
+            t += 24 + rng() * 18;
             if (t >= duration - 5) break;
             const vRoll = rng();
             let vType;
-            if (vRoll < 0.40) vType = 'no_video';
-            else if (vRoll < 0.75) vType = 'static';
-            else vType = 'no_signal';
-            const vDur = vType === 'no_signal' ? (2.5 + rng() * 2.0) : (0.8 + rng() * 1.2);
+            if (vRoll < 0.25) vType = 'no_video';
+            else if (vRoll < 0.50) vType = 'static';
+            else if (vRoll < 0.75) vType = 'no_signal';
+            else vType = 'complex_generated';
+            const vDur = (vType === 'no_signal' || vType === 'complex_generated') ? (2.5 + rng() * 2.0) : (0.8 + rng() * 1.2);
             const langIdx = Math.floor(rng() * 25);
             events.push({ time: t, type: 'visual_event', vType, duration: vDur, langIdx });
+        }
+
+        // Music substitution events: complex recurring synthesized motif replacing media audio
+        t = 15;
+        while (t < duration - 8) {
+            t += 22 + rng() * 25;
+            if (t >= duration - 5) break;
+            if (rng() < 0.38) {
+                events.push({ time: t, type: 'music_substitution', duration: 3.5 + rng() * 3.0 });
+            }
         }
 
         events.sort((a, b) => a.time - b.time);
@@ -1012,6 +1023,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 setTimeout(() => { coherenceSpike = 0; }, ev.duration * 1000);
             }
 
+            else if (ev.type === 'music_substitution') {
+                triggerMusicSubstitutionEvent(ev.duration);
+            }
+
             else if (ev.type === 'visual_event') {
                 triggerVisualInterruptEvent(ev.vType, ev.duration, ev.langIdx);
             }
@@ -1140,6 +1155,7 @@ document.addEventListener('DOMContentLoaded', () => {
             frameHistory = [];
             outroFiredForThisPlay = false;
             lastCaptureVideoTime = -1;
+            triggerEntityDecayCycle();
         }
         lastVideoTimeSeen = vt;
 
@@ -1257,6 +1273,302 @@ document.addEventListener('DOMContentLoaded', () => {
         // Keep top 120 — more coverage means more regions for text/faces
         if (candidates.length > 120) candidates.length = 120;
         textCandidateBlocks = candidates;
+    }
+
+    // ─── CORE SYSTEM: ENTITY MEMORY MODEL (Per-Entity Drift, Duplication, Rotation, & Erasure) ───
+    let memoryEntities = [];
+    let insertedEntities = [];
+    let globalDecayLevel = 0;
+    let _wakeLock = null; // Screen Wake Lock handle (keeps mobile screen on during processing)
+
+    function scanForObjectCandidates(w, h) {
+        // Larger, lower-frequency block sizes for furniture, hardware, wall fixtures, speakers
+        const blockSizes = [
+            { w: 64, h: 50 },
+            { w: 96, h: 72 },
+            { w: 128, h: 96 }
+        ];
+
+        const candidates = [];
+        try {
+            const imgData = ctx.getImageData(0, 0, w, h);
+            const data = imgData.data;
+            const lum = (idx) => 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+
+            for (const bs of blockSizes) {
+                const stepY = Math.max(16, Math.floor(bs.h * 0.6));
+                const stepX = Math.max(16, Math.floor(bs.w * 0.6));
+                for (let by = 0; by < h - bs.h; by += stepY) {
+                    for (let bx = 0; bx < w - bs.w; bx += stepX) {
+                        const p1 = (by * w + bx) * 4;
+                        const p2 = (by * w + (bx + bs.w - 1)) * 4;
+                        const p3 = ((by + bs.h - 1) * w + bx) * 4;
+                        const p4 = ((by + bs.h - 1) * w + (bx + bs.w - 1)) * 4;
+                        const pc = ((by + (bs.h >> 1)) * w + (bx + (bs.w >> 1))) * 4;
+
+                        const lums = [lum(p1), lum(p2), lum(p3), lum(p4), lum(pc)];
+                        const mn = Math.min(...lums), mx = Math.max(...lums);
+
+                        if (mx - mn > 20) {
+                            candidates.push({ x: bx, y: by, w: bs.w, h: bs.h, contrast: mx - mn });
+                        }
+                    }
+                }
+            }
+        } catch (e) {}
+
+        candidates.sort((a, b) => b.contrast - a.contrast);
+        if (candidates.length > 25) candidates.length = 25;
+        return candidates;
+    }
+
+    function initializeMemoryEntities(w, h) {
+        memoryEntities = [];
+        insertedEntities = [];
+        globalDecayLevel = 0;
+
+        if (w <= 0 || h <= 0) return;
+
+        scanForTextCandidates(w, h);
+        const objectCandidates = scanForObjectCandidates(w, h);
+
+        // 1. Text & High-Contrast Features
+        for (let i = 0; i < Math.min(8, textCandidateBlocks.length); i++) {
+            const b = textCandidateBlocks[i];
+            createMemoryEntity('text', b.x, b.y, b.w, b.h, w, h);
+        }
+
+        // 2. Hardware / Fixtures / Furniture
+        for (let i = 0; i < Math.min(6, objectCandidates.length); i++) {
+            const b = objectCandidates[i];
+            const type = (i % 2 === 0) ? 'hardware' : 'object';
+            createMemoryEntity(type, b.x, b.y, b.w, b.h, w, h);
+        }
+
+        addLog(`[ENTITY MEMORY ENGINE] Salience detection complete: ${memoryEntities.length} tracked entities`, 'alert');
+    }
+
+    function createMemoryEntity(type, x, y, w, h, canvasW, canvasH) {
+        const rx = Math.max(0, Math.min(canvasW - 10, x));
+        const ry = Math.max(0, Math.min(canvasH - 10, y));
+        const rw = Math.min(canvasW - rx, Math.max(10, w));
+        const rh = Math.min(canvasH - ry, Math.max(10, h));
+
+        // Offscreen canvas containing pristine pixels from base frame with gradient alpha edge feathering
+        const sourceCanvas = document.createElement('canvas');
+        sourceCanvas.width = rw;
+        sourceCanvas.height = rh;
+        const sCtx = sourceCanvas.getContext('2d');
+
+        try {
+            sCtx.drawImage(glitchCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
+
+            // 6px linear gradient alpha feathering around edges to avoid hard box seams
+            const featherMargin = Math.min(6, Math.floor(Math.min(rw, rh) / 4));
+            if (featherMargin > 2) {
+                const imgData = sCtx.getImageData(0, 0, rw, rh);
+                const d = imgData.data;
+                for (let py = 0; py < rh; py++) {
+                    for (let px = 0; px < rw; px++) {
+                        const distLeft = px;
+                        const distRight = rw - 1 - px;
+                        const distTop = py;
+                        const distBottom = rh - 1 - py;
+                        const minDist = Math.min(distLeft, distRight, distTop, distBottom);
+                        if (minDist < featherMargin) {
+                            const alphaFactor = minDist / featherMargin;
+                            const idx = (py * rw + px) * 4 + 3;
+                            d[idx] = Math.round(d[idx] * alphaFactor);
+                        }
+                    }
+                }
+                sCtx.putImageData(imgData, 0, 0);
+            }
+        } catch(e) {}
+
+        memoryEntities.push({
+            id: 'entity_' + Math.random().toString(36).substr(2, 7),
+            type: type, // 'text' | 'object' | 'hardware'
+            baseRect: { x: rx, y: ry, w: rw, h: rh },
+            decayLevel: 0,
+            transform: {
+                mirrorX: false,
+                mirrorY: false,
+                rotation: 0,
+                duplicated: false,
+                dupOffset: { x: 0, y: 0 },
+                opacity: 1.0
+            },
+            sourceCanvas: sourceCanvas
+        });
+    }
+
+    function triggerEntityDecayCycle() {
+        globalDecayLevel++;
+        if (!memoryEntities.length) return;
+
+        const activeEntities = memoryEntities.filter(e => e.transform.opacity > 0);
+        if (!activeEntities.length) return;
+
+        // Pick 1-2 entities to mutate per repetition cycle using seeded RNG
+        const numMutations = 1 + (frameRng() < 0.4 ? 1 : 0);
+
+        for (let m = 0; m < numMutations; m++) {
+            const currentActive = memoryEntities.filter(e => e.transform.opacity > 0);
+            if (!currentActive.length) break;
+
+            // Prioritize text at low decay levels, hardware/objects at mid levels
+            currentActive.sort((a, b) => {
+                const order = { 'text': 1, 'hardware': 2, 'object': 3 };
+                return (order[a.type] || 3) - (order[b.type] || 3);
+            });
+
+            const targetIndex = Math.floor(frameRng() * Math.min(currentActive.length, 4));
+            const entity = currentActive[targetIndex];
+            if (!entity) continue;
+
+            entity.decayLevel++;
+            const dL = entity.decayLevel;
+
+            // 1. Low decay -> mirrorX or mirrorY flip
+            if (dL <= 2) {
+                if (frameRng() < 0.6) entity.transform.mirrorX = !entity.transform.mirrorX;
+                else entity.transform.mirrorY = !entity.transform.mirrorY;
+                addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) flipped (mirrorX:${entity.transform.mirrorX}, mirrorY:${entity.transform.mirrorY})`, 'alert');
+            }
+            // 2. Mid decay -> duplicated = true with spatial offset echo
+            else if (dL <= 4) {
+                entity.transform.duplicated = true;
+                entity.transform.dupOffset = {
+                    x: Math.round((frameRng() - 0.5) * 36),
+                    y: Math.round((frameRng() - 0.5) * 28)
+                };
+                addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) duplicated with echo offset (${entity.transform.dupOffset.x}px, ${entity.transform.dupOffset.y}px)`, 'alert');
+            }
+            // 3. Mid-high decay -> rotation tilt
+            else if (dL <= 6) {
+                const rotDelta = (frameRng() - 0.5) * 0.26;
+                entity.transform.rotation += rotDelta;
+                addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) rotated by ${(rotDelta * 180 / Math.PI).toFixed(1)}°`, 'alert');
+            }
+            // 4. High decay -> opacity ramps down to 0 for total erasure!
+            else {
+                entity.transform.opacity = Math.max(0, entity.transform.opacity - 0.4);
+                addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) fading to erasure (opacity: ${entity.transform.opacity.toFixed(2)})`, 'danger');
+
+                // Object Insertion: when entity is erased, insert a procedural silhouette into its region
+                if (entity.transform.opacity <= 0) {
+                    triggerObjectInsertion(entity.baseRect);
+                }
+            }
+        }
+    }
+
+    function triggerObjectInsertion(baseRect) {
+        const types = ['speaker_cone', 'chair_back', 'cabinet_edge', 'conduit_junction'];
+        const sType = types[Math.floor(frameRng() * types.length)];
+
+        insertedEntities.push({
+            id: 'inserted_' + Math.random().toString(36).substr(2, 7),
+            type: 'inserted',
+            silhouetteType: sType,
+            baseRect: { ...baseRect },
+            opacity: 0.1 // Starts near-invisible, ramps UP over repetitions
+        });
+        addLog(`[OBJECT INSERTION] Complex inserted procedural structure '${sType}' into erased region`, 'alert');
+    }
+
+    function renderInsertedEntitySilhouette(ctx, entity) {
+        const { x, y, w, h } = entity.baseRect;
+        ctx.save();
+        ctx.globalAlpha = Math.min(1.0, entity.opacity);
+        ctx.strokeStyle = 'rgba(45, 38, 24, 0.85)';
+        ctx.fillStyle = 'rgba(28, 24, 16, 0.70)';
+        ctx.lineWidth = 2;
+
+        const cx = x + w / 2;
+        const cy = y + h / 2;
+
+        if (entity.silhouetteType === 'speaker_cone') {
+            const radius = Math.min(w, h) * 0.4;
+            ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.arc(cx, cy, radius * 0.5, 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(cx, cy, radius * 0.2, 0, Math.PI * 2); ctx.fillStyle = '#0a0a0a'; ctx.fill();
+        } else if (entity.silhouetteType === 'chair_back') {
+            ctx.beginPath();
+            ctx.rect(x + w * 0.15, y + h * 0.1, w * 0.7, h * 0.8);
+            ctx.fill(); ctx.stroke();
+            const numSlats = 3;
+            for (let i = 1; i <= numSlats; i++) {
+                const sx = x + w * 0.15 + (w * 0.7 * (i / (numSlats + 1)));
+                ctx.beginPath(); ctx.moveTo(sx, y + h * 0.2); ctx.lineTo(sx, y + h * 0.7); ctx.stroke();
+            }
+        } else if (entity.silhouetteType === 'cabinet_edge') {
+            ctx.beginPath(); ctx.rect(x, y, w, h); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.rect(x + 4, y + 4, w - 8, h - 8); ctx.stroke();
+            ctx.fillStyle = '#665533';
+            ctx.fillRect(x + 6, y + 8, 4, 4);
+            ctx.fillRect(x + 6, y + h - 12, 4, 4);
+        } else {
+            ctx.beginPath(); ctx.rect(cx - 6, y, 12, h); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = '#776644';
+            ctx.fillRect(cx - 10, y + h * 0.25, 20, 6);
+            ctx.fillRect(cx - 10, y + h * 0.75, 20, 6);
+        }
+        ctx.restore();
+    }
+
+    function renderMemoryEntities(ctx, now) {
+        if (!memoryEntities.length && !insertedEntities.length) return;
+
+        for (const e of memoryEntities) {
+            if (e.transform.opacity <= 0) continue; // Erased / fully forgotten
+
+            const { x, y, w, h } = e.baseRect;
+            const cx = x + w / 2;
+            const cy = y + h / 2;
+
+            ctx.save();
+            ctx.globalAlpha = e.transform.opacity;
+
+            ctx.translate(cx, cy);
+            if (e.transform.rotation !== 0) ctx.rotate(e.transform.rotation);
+            ctx.scale(e.transform.mirrorX ? -1 : 1, e.transform.mirrorY ? -1 : 1);
+            ctx.translate(-cx, -cy);
+
+            try {
+                ctx.drawImage(e.sourceCanvas, x, y, w, h);
+            } catch(err) {}
+
+            ctx.restore();
+
+            // Duplicated echo pass
+            if (e.transform.duplicated) {
+                ctx.save();
+                ctx.globalAlpha = e.transform.opacity * 0.55;
+                const ox = x + e.transform.dupOffset.x;
+                const oy = y + e.transform.dupOffset.y;
+                const dcx = ox + w / 2;
+                const dcy = oy + h / 2;
+
+                ctx.translate(dcx, dcy);
+                if (e.transform.rotation !== 0) ctx.rotate(e.transform.rotation);
+                ctx.scale(e.transform.mirrorX ? -1 : 1, e.transform.mirrorY ? -1 : 1);
+                ctx.translate(-dcx, -dcy);
+
+                try {
+                    ctx.drawImage(e.sourceCanvas, ox, oy, w, h);
+                } catch(err) {}
+
+                ctx.restore();
+            }
+        }
+
+        // Render inserted procedural silhouettes
+        for (const inst of insertedEntities) {
+            if (inst.opacity < 1.0) inst.opacity = Math.min(1.0, inst.opacity + 0.05);
+            renderInsertedEntitySilhouette(ctx, inst);
+        }
     }
 
     function applyMisrememberedTextGlitch(w, h, intensity, now) {
@@ -1455,13 +1767,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const lang = NO_SIGNAL_LANGS[langIdx % NO_SIGNAL_LANGS.length];
         activeVisualEvent = { type: vType, endMs: performance.now() + durationSec * 1000, lang };
 
-        const labels = { no_video: 'NO VIDEO', static: 'STATIC INTERFERENCE', no_signal: 'NO SIGNAL' };
+        const labels = { no_video: 'NO VIDEO', static: 'STATIC INTERFERENCE', no_signal: 'NO SIGNAL', complex_generated: 'COMPLEX GENERATED FEED' };
         addLog(`VISUAL INTERRUPT: ${labels[vType] || vType} — ${durationSec.toFixed(1)}s`, 'danger');
 
         if (vType === 'no_signal') {
             playNoSignalMusic();
             if (sourceVideo) sourceVideo.muted = true;
             if (mainGainNode && audioCtx) mainGainNode.gain.setTargetAtTime(0.0, audioCtx.currentTime, 0.05);
+        }
+        if (vType === 'complex_generated') {
+            if (sourceVideo) sourceVideo.muted = true;
+            if (mainGainNode && audioCtx) mainGainNode.gain.setTargetAtTime(0.0, audioCtx.currentTime, 0.05);
+            playComplexGeneratedAmbience();
         }
         // For no_video: keep video audio, duck slightly
         if (vType === 'no_video') {
@@ -1528,6 +1845,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try { noSignalAudioSourceNode.disconnect(); } catch(e) {}
             noSignalAudioSourceNode = null;
         }
+        stopComplexGeneratedAmbience();
         // Unmute video audio element and restore gain level
         if (sourceVideo) sourceVideo.muted = false;
         if (mainGainNode && audioCtx) mainGainNode.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.15);
@@ -1628,6 +1946,172 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.fillStyle = 'rgba(255,255,255,0.5)';
         ctx.fillText('CH 03', w - 8, 8);
         ctx.restore();
+    }
+
+    // ─── PROCEDURAL COMPLEX-GENERATED FEED & SYNTHESIZED MUSIC SUBSTITUTION ───
+    let complexAmbienceOsc = null;
+    let complexAmbienceGain = null;
+
+    function renderComplexGeneratedFrame(w, h, now) {
+        ctx.save();
+
+        // Liminal carpet/wall yellow-grey base
+        ctx.fillStyle = '#baa85c';
+        ctx.fillRect(0, 0, w, h);
+
+        // Vanishing point in perspective center
+        const vpX = w * 0.5 + Math.sin(now * 0.0006) * 12;
+        const vpY = h * 0.45 + Math.cos(now * 0.0008) * 8;
+
+        // Wall, ceiling, floor perspective lines
+        ctx.strokeStyle = 'rgba(75, 65, 25, 0.75)';
+        ctx.lineWidth = 3;
+
+        ctx.beginPath();
+        ctx.moveTo(0, 0); ctx.lineTo(vpX, vpY);
+        ctx.moveTo(w, 0); ctx.lineTo(vpX, vpY);
+        ctx.moveTo(0, h); ctx.lineTo(vpX, vpY);
+        ctx.moveTo(w, h); ctx.lineTo(vpX, vpY);
+        ctx.stroke();
+
+        // Receding corridor door frames
+        const numFrames = 5;
+        for (let i = 1; i <= numFrames; i++) {
+            const t = (i / numFrames);
+            const fw = w * (1 - t * 0.78);
+            const fh = h * (1 - t * 0.78);
+            const fx = vpX - fw * 0.5;
+            const fy = vpY - fh * 0.5;
+
+            ctx.strokeStyle = `rgba(55, 45, 18, ${0.85 - t * 0.45})`;
+            ctx.strokeRect(fx, fy, fw, fh);
+        }
+
+        // Tiled wallpaper pattern simulation
+        ctx.fillStyle = 'rgba(130, 115, 50, 0.22)';
+        for (let py = 0; py < h; py += 32) {
+            for (let px = 0; px < w; px += 24) {
+                if (((px / 24) + (py / 32)) % 2 === 0) {
+                    ctx.fillRect(px, py, 12, 16);
+                }
+            }
+        }
+
+        // Overhead fluorescent light strip
+        const lightW = w * 0.28;
+        const lightX = vpX - lightW * 0.5;
+        ctx.fillStyle = 'rgba(255, 250, 210, 0.90)';
+        ctx.fillRect(lightX, Math.max(10, vpY * 0.18), lightW, 8);
+        ctx.shadowColor = 'rgba(255, 245, 180, 0.8)';
+        ctx.shadowBlur = 20;
+        ctx.fillRect(lightX, Math.max(10, vpY * 0.18), lightW, 8);
+
+        // OSD Status
+        ctx.font = '12px monospace';
+        ctx.fillStyle = 'rgba(0, 255, 102, 0.85)';
+        ctx.fillText('[ASYNC FEED // COMPLEX GENERATED ENVIRONMENT]', 20, 30);
+
+        ctx.restore();
+    }
+
+    function playComplexGeneratedAmbience() {
+        if (!audioCtx) return;
+        try {
+            if (!complexAmbienceOsc) {
+                complexAmbienceOsc = audioCtx.createOscillator();
+                complexAmbienceOsc.type = 'sawtooth';
+                complexAmbienceOsc.frequency.value = 52.8;
+
+                const lpf = audioCtx.createBiquadFilter();
+                lpf.type = 'lowpass';
+                lpf.frequency.value = 240;
+
+                complexAmbienceGain = audioCtx.createGain();
+                complexAmbienceGain.gain.value = 0.28;
+
+                complexAmbienceOsc.connect(lpf);
+                lpf.connect(complexAmbienceGain);
+                complexAmbienceGain.connect(pannerNode || audioCtx.destination);
+                if (streamDestination) complexAmbienceGain.connect(streamDestination);
+                complexAmbienceOsc.start();
+            } else {
+                complexAmbienceGain.gain.setTargetAtTime(0.28, audioCtx.currentTime, 0.2);
+            }
+        } catch(e) {}
+    }
+
+    function stopComplexGeneratedAmbience() {
+        if (complexAmbienceGain && audioCtx) {
+            complexAmbienceGain.gain.setTargetAtTime(0.0, audioCtx.currentTime, 0.3);
+        }
+    }
+
+    // Music substitution synth: seed-locked recurring detuned motif
+    let musicSubGain = null;
+    let musicSubOsc1 = null;
+    let musicSubOsc2 = null;
+    let musicSubLFO = null;
+
+    function createComplexGeneratedMusicSynth() {
+        if (!audioCtx || musicSubGain) return;
+
+        try {
+            musicSubGain = audioCtx.createGain();
+            musicSubGain.gain.value = 0.0;
+
+            const baseFreq = 146.83; // D3
+            const motifFreqs = [baseFreq, baseFreq * 1.2, baseFreq * 1.5, baseFreq * 1.75];
+            const seedIndex = Math.floor(seededRng() * motifFreqs.length);
+            const targetFreq = motifFreqs[seedIndex];
+
+            musicSubOsc1 = audioCtx.createOscillator();
+            musicSubOsc1.type = 'sine';
+            musicSubOsc1.frequency.value = targetFreq;
+
+            musicSubOsc2 = audioCtx.createOscillator();
+            musicSubOsc2.type = 'triangle';
+            musicSubOsc2.frequency.value = targetFreq * 1.006;
+
+            musicSubLFO = audioCtx.createOscillator();
+            musicSubLFO.type = 'sine';
+            musicSubLFO.frequency.value = 0.35;
+
+            const lfoGain = audioCtx.createGain();
+            lfoGain.gain.value = 4.0;
+            musicSubLFO.connect(lfoGain);
+            lfoGain.connect(musicSubOsc1.detune);
+
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 650;
+
+            musicSubOsc1.connect(filter);
+            musicSubOsc2.connect(filter);
+            filter.connect(musicSubGain);
+
+            musicSubGain.connect(pannerNode || audioCtx.destination);
+            if (streamDestination) musicSubGain.connect(streamDestination);
+
+            musicSubOsc1.start();
+            musicSubOsc2.start();
+            musicSubLFO.start();
+            addLog('[MUSIC SUBSTITUTION SYNTH] Initialized copyright-clean motif synth', 'normal');
+        } catch(e) {}
+    }
+
+    function triggerMusicSubstitutionEvent(durationSeconds) {
+        if (!audioCtx) return;
+        createComplexGeneratedMusicSynth();
+
+        if (mainGainNode) mainGainNode.gain.setTargetAtTime(0.04, audioCtx.currentTime, 0.2);
+        if (musicSubGain) musicSubGain.gain.setTargetAtTime(0.35, audioCtx.currentTime, 0.3);
+
+        addLog(`[MUSIC SUBSTITUTION] Media audio replaced by Complex recurring motif (${durationSeconds.toFixed(1)}s)`, 'alert');
+
+        setTimeout(() => {
+            if (mainGainNode) mainGainNode.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.4);
+            if (musicSubGain) musicSubGain.gain.setTargetAtTime(0.0, audioCtx.currentTime, 0.5);
+        }, durationSeconds * 1000);
     }
 
     // Render low-quality VHS "NO VIDEO" — solid pitch black screen with OSD corner text
@@ -1813,7 +2297,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (!hasFrame) return;
 
-        // --- VISUAL INTERRUPT EVENTS (no_video / static / no_signal) ---
+        // --- VISUAL INTERRUPT EVENTS (no_video / static / no_signal / complex_generated) ---
         // These override normal video rendering
         if (activeVisualEvent) {
             if (now > activeVisualEvent.endMs) {
@@ -1832,6 +2316,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     renderStaticFrame(w, h);
                 } else if (type === 'no_signal') {
                     renderNoSignalScreen(w, h, lang);
+                } else if (type === 'complex_generated') {
+                    renderComplexGeneratedFrame(w, h, now);
                 }
                 // Skip normal distortion — the visual event IS the frame
                 updateTimeline();
@@ -1840,6 +2326,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
         }
+
+        // --- CORE SYSTEM: ENTITY MEMORY MODEL OVERLAY ---
+        // Layer tracked salient feature entities (text, hardware, fixtures) with compounding drift & erasure over untouched base
+        renderMemoryEntities(ctx, now);
 
         // --- PERIODIC DISTORTION WINDOW CHECK ---
         const chromaticPx = getSliderValue(chromaticAberrationSlider, 28);
@@ -1936,11 +2426,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     applyFaceColumnMelt(mx, my, mw, mh, masterVal, now);
                 }
             }
-            // Geometry shear: subtle in normal mode, heavy in degradation
-            const shearIntensity = isDegrading ? masterVal * 0.6 : (isWarpingActive && masterVal > 0.6 ? masterVal * 0.15 : 0);
-            if (shearIntensity > 0.05 && Math.random() < (isDegrading ? 0.7 : 0.15)) {
-                applyGeometryShear(w, h, shearIntensity, now);
-            }
+            // Geometry shear replaced by Entity Memory Model per-entity drift
         }
 
         // FINAL DEGRADATION BREAKDOWN: In the last 15% of playback, apply extreme visual+audio destruction
@@ -2000,8 +2486,6 @@ document.addEventListener('DOMContentLoaded', () => {
             // ── EXTREME VISUAL COLLAPSE ───────────────────────────────────────────────
             // Full-frame pixel sort destroys spatial coherence
             applyPixelSortRegion(0, 0, w, h, 0.8 + collapseIntensity * 0.2);
-            // Heavy geometry shear makes everything tilt and slide
-            applyGeometryShear(w, h, 0.5 + collapseIntensity * 0.9, now);
             applyRealityTear(w, h, 1.5 + collapseIntensity * 2.5);
             applyPosterBandMelt(w, h, now);
             // Extreme pixelation: downscale then upscale for that disintegrating look
@@ -2244,6 +2728,9 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.clearRect(0, 0, w, h);
             ctx.drawImage(img, 0, 0, w, h);
 
+            // Entity Memory Model: scan image for salient features
+            initializeMemoryEntities(w, h);
+
             const masterVal = getSliderValue(masterIntensitySlider, 85) / 100;
             const flawedMirrorVal = getSliderValue(flawedMirroringSlider, 80);
             const chromaticPx = getSliderValue(chromaticAberrationSlider, 28);
@@ -2369,67 +2856,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
             ctx.putImageData(imgData, rx, ry);
-        } catch (e) {}
-    }
-
-    // GEOMETRY SHEAR: shifts horizontal strips at varying rates, like the Backrooms decay
-    // (objects slide sideways, edges peel apart, geometry becomes impossible)
-    // GEOMETRY SHEAR + STRETCH: shifts AND vertically stretches horizontal strips at varying rates,
-    // like the Backrooms decay — objects slide sideways AND get pulled/elongated like taffy.
-    function applyGeometryShear(w, h, intensity, now) {
-        try {
-            const numBands = 6 + Math.floor(intensity * 10);
-            const bandH = Math.floor(h / numBands);
-            const t = now * 0.0006;
-
-            // Pick 1-2 bands to do dramatic vertical stretch (the taffy pull effect)
-            const stretchBandA = Math.floor((Math.sin(t * 0.7) * 0.5 + 0.5) * numBands);
-            const stretchBandB = Math.floor((Math.cos(t * 0.4) * 0.5 + 0.5) * numBands);
-
-            for (let b = 0; b < numBands; b++) {
-                const by = b * bandH;
-                const bh = Math.min(bandH, h - by);
-                if (bh < 2) continue;
-
-                // Horizontal slide for each band
-                const shiftX = Math.round(
-                    Math.sin(b * 0.8 + t) * intensity * w * 0.15 +
-                    Math.sin(b * 0.23 + t * 0.4) * intensity * w * 0.08
-                );
-
-                // Vertical stretch: some bands get pulled taller (elongated) or squished
-                const isStretchBand = (b === stretchBandA || b === stretchBandB);
-                const stretchFactor = isStretchBand
-                    ? 1.0 + intensity * (1.2 + Math.sin(t + b) * 0.8)  // taffy pull: up to 3x taller
-                    : 1.0 + Math.sin(b * 1.3 + t * 0.5) * intensity * 0.3; // subtle bounce
-
-                try {
-                    if (Math.abs(stretchFactor - 1.0) > 0.05 || shiftX !== 0) {
-                        // Grab the band
-                        const bandData = ctx.getImageData(0, by, w, bh);
-                        // Create a small offscreen canvas to hold it
-                        const offC = document.createElement('canvas');
-                        offC.width = w;
-                        offC.height = bh;
-                        const offCtx = offC.getContext('2d');
-                        offCtx.putImageData(bandData, 0, 0);
-
-                        // Draw the band scaled (stretched vertically) back onto main canvas
-                        const destH = Math.round(bh * stretchFactor);
-                        // Clear the source region first (black gap)
-                        ctx.fillStyle = 'rgba(0,0,0,0.85)';
-                        ctx.fillRect(0, by, w, bh);
-                        // Stamp the stretched/shifted version
-                        ctx.drawImage(offC, shiftX, by, w, destH);
-                        // Fill horizontal gap from slide
-                        if (shiftX !== 0) {
-                            ctx.fillStyle = 'rgba(0,0,0,0.7)';
-                            if (shiftX > 0) ctx.fillRect(0, by, shiftX, destH);
-                            else ctx.fillRect(w + shiftX, by, -shiftX, destH);
-                        }
-                    }
-                } catch(e) {}
-            }
         } catch (e) {}
     }
     // Each function operates on a sub-rect (rx,ry,rw,rh) of the canvas
@@ -2907,6 +3333,9 @@ document.addEventListener('DOMContentLoaded', () => {
         _suppressNextVideoError = true; // the empty-src load fires Code 4 — ignore it
         setTimeout(() => { _suppressNextVideoError = false; }, 500);
 
+        // Release any existing wake lock when swapping files
+        if (_wakeLock) { try { _wakeLock.release(); } catch(e) {} _wakeLock = null; }
+
         // Reset state variables
         isPlaying = false;
         isAudioBlackout = false;
@@ -2985,6 +3414,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 mriScanEndTime = mriScanStartTime + 1800; // 1.8s ASYNC MRI scan sweep
                 addLog(`[ASYNC SCANNER] Initialized MRI analysis sweep on target '${file.name}'`, 'normal');
 
+                // Entity Memory Model: scan & register salient features on load
+                initializeMemoryEntities(vw, vh);
+
+                // Wake lock: keep screen awake during video processing (mobile)
+                if ('wakeLock' in navigator) {
+                    navigator.wakeLock.request('screen').then(wl => {
+                        _wakeLock = wl;
+                        _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+                    }).catch(() => {});
+                }
+
                 // Audio nodes set up here — AFTER metadata is confirmed healthy
                 setupAudioNodesForSource(sourceVideo);
 
@@ -3038,6 +3478,15 @@ document.addEventListener('DOMContentLoaded', () => {
             sourceAudio.addEventListener('loadedmetadata', () => {
                 distortionSchedule = generateDistortionSchedule(sourceAudio.duration || 10);
                 scheduleIndex = 0;
+                // Entity Memory Model: audio has no visual frame but initialize with display canvas dims
+                initializeMemoryEntities(glitchCanvas.width || 800, glitchCanvas.height || 400);
+                // Wake lock for audio processing
+                if ('wakeLock' in navigator) {
+                    navigator.wakeLock.request('screen').then(wl => {
+                        _wakeLock = wl;
+                        _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+                    }).catch(() => {});
+                }
             }, { once: true });
             addLog(`Loaded Audio File: ${file.name}`, 'normal');
         } else if (isImage) {
@@ -3179,6 +3628,10 @@ document.addEventListener('DOMContentLoaded', () => {
         processingTitle.textContent = `PROCESSING ENTIRE ${mediaType.toUpperCase()} FILE...`;
         processingSubtitle.textContent = 'Applying Audio Pitch Drift, Feature Duplication & Reality Shifts';
 
+        // Show tab focus / wake lock reminder
+        const processingTip = document.getElementById('processingTip');
+        if (processingTip) processingTip.style.display = 'flex';
+
         addLog(`BATCH EXPORT STARTED: Processing entire ${mediaType.toUpperCase()} file...`, 'danger');
 
         if (mediaType === 'audio') {
@@ -3188,6 +3641,11 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (mediaType === 'image') {
             await processFullImageFile();
         }
+
+        // Hide tip once done
+        if (processingTip) processingTip.style.display = 'none';
+        // Release wake lock now that encoding is done
+        if (_wakeLock) { try { _wakeLock.release(); } catch(e) {} _wakeLock = null; }
     });
 
     async function processFullAudioFile() {
