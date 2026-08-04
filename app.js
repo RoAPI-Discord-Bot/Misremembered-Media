@@ -1146,16 +1146,26 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    let _lastEntityDecayTime = 0;  // tracks periodic in-playback decay
+    const ENTITY_DECAY_INTERVAL_MS = 12000; // fire a decay cycle every ~12 seconds during playback
+
     // --- MEMORY ECHO REPLAY ---
     function captureFrameSnapshot() {
         if (mediaType !== 'video' || sourceVideo.readyState < 2) return;
         const vt = sourceVideo.currentTime;
+        const nowMs = performance.now();
 
         if (vt < lastVideoTimeSeen - 0.5) {
+            // Video looped — full decay cycle + rescan with fresh frame data
             frameHistory = [];
             outroFiredForThisPlay = false;
             lastCaptureVideoTime = -1;
             triggerEntityDecayCycle();
+            _lastEntityDecayTime = nowMs;
+        } else if (nowMs - _lastEntityDecayTime > ENTITY_DECAY_INTERVAL_MS && memoryEntities.length > 0) {
+            // Periodic in-playback decay: mutate 1-2 entities roughly every 12s
+            triggerEntityDecayCycle();
+            _lastEntityDecayTime = nowMs;
         }
         lastVideoTimeSeen = vt;
 
@@ -1296,20 +1306,29 @@ document.addEventListener('DOMContentLoaded', () => {
             const lum = (idx) => 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
 
             for (const bs of blockSizes) {
-                const stepY = Math.max(16, Math.floor(bs.h * 0.6));
-                const stepX = Math.max(16, Math.floor(bs.w * 0.6));
+                // Dense 3x3 step grid — catches contrast at any interior point
+                const stepY = Math.max(12, Math.floor(bs.h * 0.4));
+                const stepX = Math.max(12, Math.floor(bs.w * 0.4));
                 for (let by = 0; by < h - bs.h; by += stepY) {
                     for (let bx = 0; bx < w - bs.w; bx += stepX) {
-                        const p1 = (by * w + bx) * 4;
-                        const p2 = (by * w + (bx + bs.w - 1)) * 4;
-                        const p3 = ((by + bs.h - 1) * w + bx) * 4;
-                        const p4 = ((by + bs.h - 1) * w + (bx + bs.w - 1)) * 4;
-                        const pc = ((by + (bs.h >> 1)) * w + (bx + (bs.w >> 1))) * 4;
-
-                        const lums = [lum(p1), lum(p2), lum(p3), lum(p4), lum(pc)];
+                        // Sample a 3x3 grid within the block (9 points)
+                        const hw = bs.w >> 1, hh = bs.h >> 1;
+                        const pts = [
+                            (by * w + bx) * 4,
+                            (by * w + bx + hw) * 4,
+                            (by * w + bx + bs.w - 1) * 4,
+                            ((by + hh) * w + bx) * 4,
+                            ((by + hh) * w + bx + hw) * 4,
+                            ((by + hh) * w + bx + bs.w - 1) * 4,
+                            ((by + bs.h - 1) * w + bx) * 4,
+                            ((by + bs.h - 1) * w + bx + hw) * 4,
+                            ((by + bs.h - 1) * w + bx + bs.w - 1) * 4
+                        ];
+                        const lums = pts.map(lum);
                         const mn = Math.min(...lums), mx = Math.max(...lums);
 
-                        if (mx - mn > 20) {
+                        // Lowered threshold: 8 instead of 20 — captures subtle gradients in dim scenes
+                        if (mx - mn > 8) {
                             candidates.push({ x: bx, y: by, w: bs.w, h: bs.h, contrast: mx - mn });
                         }
                     }
@@ -1318,7 +1337,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) {}
 
         candidates.sort((a, b) => b.contrast - a.contrast);
-        if (candidates.length > 25) candidates.length = 25;
+        if (candidates.length > 30) candidates.length = 30;
         return candidates;
     }
 
@@ -1332,17 +1351,32 @@ document.addEventListener('DOMContentLoaded', () => {
         scanForTextCandidates(w, h);
         const objectCandidates = scanForObjectCandidates(w, h);
 
-        // 1. Text & High-Contrast Features
+        // 1. Text & High-Contrast Features (up to 8)
         for (let i = 0; i < Math.min(8, textCandidateBlocks.length); i++) {
             const b = textCandidateBlocks[i];
             createMemoryEntity('text', b.x, b.y, b.w, b.h, w, h);
         }
 
-        // 2. Hardware / Fixtures / Furniture
+        // 2. Hardware / Fixtures / Furniture (up to 6)
         for (let i = 0; i < Math.min(6, objectCandidates.length); i++) {
             const b = objectCandidates[i];
             const type = (i % 2 === 0) ? 'hardware' : 'object';
             createMemoryEntity(type, b.x, b.y, b.w, b.h, w, h);
+        }
+
+        // 3. FALLBACK: if the scene is very dark/uniform and contrast scan found nothing,
+        //    seed at least 6 random-positioned entities so the system always has something to decay.
+        //    These are seeded from real canvas pixels at those positions.
+        if (memoryEntities.length === 0) {
+            addLog('[ENTITY MEMORY ENGINE] Low-contrast scene — seeding fallback entities from random regions', 'normal');
+            const fallbackTypes = ['text', 'hardware', 'object', 'hardware', 'text', 'object'];
+            for (let f = 0; f < 6; f++) {
+                const fw = 80 + Math.floor(Math.random() * 100);
+                const fh = 60 + Math.floor(Math.random() * 80);
+                const fx = Math.floor(Math.random() * Math.max(1, w - fw));
+                const fy = Math.floor(Math.random() * Math.max(1, h - fh));
+                createMemoryEntity(fallbackTypes[f], fx, fy, fw, fh, w, h);
+            }
         }
 
         addLog(`[ENTITY MEMORY ENGINE] Salience detection complete: ${memoryEntities.length} tracked entities`, 'alert');
@@ -3349,6 +3383,10 @@ document.addEventListener('DOMContentLoaded', () => {
         outroFiredForThisPlay = false;
         textCandidateBlocks = [];
         lastTextScanTime = 0;
+        memoryEntities = [];
+        insertedEntities = [];
+        globalDecayLevel = 0;
+        _lastEntityDecayTime = 0;
 
         // Clear canvas
         ctx.clearRect(0, 0, glitchCanvas.width, glitchCanvas.height);
@@ -3414,9 +3452,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 mriScanEndTime = mriScanStartTime + 1800; // 1.8s ASYNC MRI scan sweep
                 addLog(`[ASYNC SCANNER] Initialized MRI analysis sweep on target '${file.name}'`, 'normal');
 
-                // Entity Memory Model: scan & register salient features on load
-                initializeMemoryEntities(vw, vh);
-
                 // Wake lock: keep screen awake during video processing (mobile)
                 if ('wakeLock' in navigator) {
                     navigator.wakeLock.request('screen').then(wl => {
@@ -3432,12 +3467,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 try { sourceVideo.currentTime = 0.05; } catch (e) {}
 
                 // Paint on seeked (works even before play starts)
+                // Entity Memory Model scan runs AFTER the first real frame is on the canvas
                 const firstFramePaint = () => {
                     try {
                         const blitCtx = getVideoBlitCtx(vw, vh);
                         blitCtx.drawImage(sourceVideo, 0, 0, vw, vh);
                         ctx.drawImage(_videoBlitCanvas, 0, 0);
                     } catch(e) { try { ctx.drawImage(sourceVideo, 0, 0, vw, vh); } catch(e2) {} }
+                    // NOW the canvas has real pixels — scan for entities
+                    initializeMemoryEntities(vw, vh);
+                    // Also schedule a rescan 2s into playback (better pixel data, scene has changed)
+                    setTimeout(() => {
+                        if (mediaType === 'video' && memoryEntities.length < 4) {
+                            addLog('[ENTITY MEMORY ENGINE] Rescanning for entities with live frame data...', 'normal');
+                            initializeMemoryEntities(vw, vh);
+                        }
+                    }, 2000);
                 };
                 sourceVideo.addEventListener('seeked', firstFramePaint, { once: true });
 
