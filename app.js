@@ -1491,113 +1491,115 @@ document.addEventListener('DOMContentLoaded', () => {
     // =========================================================================
     // =========================================================================
     // UNCANNY FACIAL MISREMEMBERING — CASCADE NOSE STAMP + EYE SHIFT
-    // Exactly replicates the reference image:
-    //   - The nose is duplicated 3-4 times cascading diagonally downward, each
-    //     copy slightly overlapping the previous, with soft radial feathering
-    //   - One eye is subtly lifted upward and blended back in
-    //   - Everything else stays completely untouched / photographic
+    // - Nose is copied 3 times cascading diagonally downward, slightly overlapping
+    // - One eye is nudged upward by a small number of pixels
+    // - All regions are tightly clamped so only the actual nose/eye is extracted
     // =========================================================================
     function applyUncannyFaceMorph(face, w, h, intensity, now) {
         if (!face) return;
         try {
-            const fw = face.w;
-            const fh = face.h;
             const nose = face.nose;
+            const eyes = face.eyes;
 
             // ── PASS 1: Cascading Nose Duplication ──────────────────────────
-            // Extract a region around the nose (wider than the nose landmark alone)
-            const noseRegX = Math.max(0, nose.x - Math.round(nose.w * 0.25));
-            const noseRegY = Math.max(0, nose.y - Math.round(nose.h * 0.15));
-            const noseRegW = Math.min(w - noseRegX, Math.round(nose.w * 1.5));
-            const noseRegH = Math.min(h - noseRegY, Math.round(nose.h * 1.4));
+            // Tightly crop just the nose — no padding expansion that inflates into the whole face
+            // Hard-cap the stamp to 90×70px max so it's the nose, not the whole face
+            const rawNW = nose.w;
+            const rawNH = nose.h;
+            const capNW = Math.min(rawNW, 90);
+            const capNH = Math.min(rawNH, 70);
 
-            if (noseRegW > 10 && noseRegH > 10) {
-                // Build an offscreen canvas with the nose pixel data + soft radial edge mask
+            // Center the capped region on the nose landmark center
+            const noseCX = nose.x + rawNW * 0.5;
+            const noseCY = nose.y + rawNH * 0.5;
+            const noseRegX = Math.max(0, Math.round(noseCX - capNW * 0.5));
+            const noseRegY = Math.max(0, Math.round(noseCY - capNH * 0.5));
+            const noseRegW = Math.min(w - noseRegX, capNW);
+            const noseRegH = Math.min(h - noseRegY, capNH);
+
+            if (noseRegW > 8 && noseRegH > 8) {
                 const noseCanvas = document.createElement('canvas');
                 noseCanvas.width  = noseRegW;
                 noseCanvas.height = noseRegH;
                 const nCtx = noseCanvas.getContext('2d');
-
-                // Draw the exact nose pixels onto the offscreen canvas
                 nCtx.drawImage(glitchCanvas, noseRegX, noseRegY, noseRegW, noseRegH, 0, 0, noseRegW, noseRegH);
 
-                // Soft radial gradient mask so copies blend seamlessly (no hard box edges)
+                // Soft oval mask so stamp edges are invisible
                 nCtx.globalCompositeOperation = 'destination-in';
                 const grad = nCtx.createRadialGradient(
-                    noseRegW * 0.5, noseRegH * 0.5, Math.min(noseRegW, noseRegH) * 0.08,
-                    noseRegW * 0.5, noseRegH * 0.5, Math.min(noseRegW, noseRegH) * 0.58
+                    noseRegW * 0.5, noseRegH * 0.5, Math.min(noseRegW, noseRegH) * 0.05,
+                    noseRegW * 0.5, noseRegH * 0.5, Math.min(noseRegW, noseRegH) * 0.55
                 );
                 grad.addColorStop(0,   'rgba(0,0,0,1)');
-                grad.addColorStop(0.5, 'rgba(0,0,0,0.92)');
+                grad.addColorStop(0.55,'rgba(0,0,0,0.90)');
                 grad.addColorStop(1,   'rgba(0,0,0,0)');
                 nCtx.fillStyle = grad;
                 nCtx.fillRect(0, 0, noseRegW, noseRegH);
 
-                // Determine diagonal direction: angled slightly toward lower-cheek/jaw
-                // The angle in the reference is roughly 10-18° below horizontal
-                const stepX = Math.round(noseRegW * 0.18);   // rightward per step
-                const stepY = Math.round(noseRegH * 0.72);   // downward per step (dominant)
-                const angle  = -0.18; // subtle CCW tilt so copies look naturally diagonal
+                // Each copy steps: a little rightward + mostly downward (diagonal cascade)
+                // stepX/Y are in pixels, NOT multiples of the stamp size
+                const stepX = Math.round(noseRegW * 0.22);   // ~20% of stamp width rightward
+                const stepY = Math.round(noseRegH * 0.80);   // ~80% of stamp height downward = slight overlap
 
-                const numCopies = 4; // 4 copies creates 3 overlapping steps below the original
-
+                const numCopies = 3;
                 for (let i = 1; i <= numCopies; i++) {
                     const destX = noseRegX + stepX * i;
                     const destY = noseRegY + stepY * i;
-                    // First copy is most opaque, fades out toward the bottom
-                    const alpha = Math.max(0.10, 0.82 - i * 0.16);
+                    const alpha = Math.max(0.08, 0.72 - i * 0.20); // 0.52, 0.32, 0.12
 
-                    // Clip stamp to canvas bounds
-                    if (destX + noseRegW < 0 || destX > w) continue;
-                    if (destY + noseRegH < 0 || destY > h) continue;
+                    if (destX > w || destY > h) continue;
 
                     ctx.save();
                     ctx.globalAlpha = alpha;
+                    // Very slight tilt that accumulates — looks naturally diagonal, not robotic
                     ctx.translate(destX + noseRegW * 0.5, destY + noseRegH * 0.5);
-                    ctx.rotate(angle * i * 0.4);  // small cumulative tilt per step
+                    ctx.rotate(-0.07 * i);
                     ctx.drawImage(noseCanvas, -noseRegW * 0.5, -noseRegH * 0.5);
                     ctx.restore();
                 }
             }
 
             // ── PASS 2: Asymmetric Eye Lift ──────────────────────────────────
-            // Pick the eye that's closer to the camera / more visible (larger region)
-            const eyes = face.eyes;
+            // Pick the more visible/larger eye; hard-cap stamp size so it's just the eye socket
             const leftArea  = eyes.left.w  * eyes.left.h;
             const rightArea = eyes.right.w * eyes.right.h;
-            const targetEye = leftArea >= rightArea ? eyes.left : eyes.right;
+            const srcEye    = leftArea >= rightArea ? eyes.left : eyes.right;
 
-            const ex = Math.max(0, targetEye.x - Math.round(targetEye.w * 0.2));
-            const ey = Math.max(0, targetEye.y - Math.round(targetEye.h * 0.2));
-            const ew = Math.min(w - ex, Math.round(targetEye.w * 1.4));
-            const eh = Math.min(h - ey, Math.round(targetEye.h * 1.4));
+            // Hard-cap to max 80×40px so we never accidentally grab half the face
+            const capEW = Math.min(srcEye.w, 80);
+            const capEH = Math.min(srcEye.h, 40);
+            const eyeCX = srcEye.x + srcEye.w * 0.5;
+            const eyeCY = srcEye.y + srcEye.h * 0.5;
+            const ex = Math.max(0, Math.round(eyeCX - capEW * 0.5));
+            const ey = Math.max(0, Math.round(eyeCY - capEH * 0.5));
+            const ew = Math.min(w - ex, capEW);
+            const eh = Math.min(h - ey, capEH);
 
             if (ew > 8 && eh > 8) {
                 const eyeCanvas = document.createElement('canvas');
                 eyeCanvas.width  = ew;
                 eyeCanvas.height = eh;
                 const eCtx = eyeCanvas.getContext('2d');
-
                 eCtx.drawImage(glitchCanvas, ex, ey, ew, eh, 0, 0, ew, eh);
 
-                // Soft radial edge blend
+                // Soft oval blend mask
                 eCtx.globalCompositeOperation = 'destination-in';
                 const eGrad = eCtx.createRadialGradient(
-                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.08,
-                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.52
+                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.05,
+                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.50
                 );
                 eGrad.addColorStop(0,   'rgba(0,0,0,1)');
-                eGrad.addColorStop(0.6, 'rgba(0,0,0,0.88)');
+                eGrad.addColorStop(0.6, 'rgba(0,0,0,0.85)');
                 eGrad.addColorStop(1,   'rgba(0,0,0,0)');
                 eCtx.fillStyle = eGrad;
                 eCtx.fillRect(0, 0, ew, eh);
 
-                // Lift upward — this creates the "wrong eye height" uncanny look
-                const liftY = Math.round(eh * 0.28);  // lift ~28% of eye height
+                // Lift upward by a fixed small number of pixels (not a percentage of a giant region)
+                const liftPx = Math.round(eh * 0.5); // lift by half the eye height
 
                 ctx.save();
-                ctx.globalAlpha = 0.90;
-                ctx.drawImage(eyeCanvas, ex, ey - liftY);
+                ctx.globalAlpha = 0.88;
+                ctx.drawImage(eyeCanvas, ex, ey - liftPx);
                 ctx.restore();
             }
 
