@@ -262,11 +262,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const FRAME_HISTORY_MAX_SECONDS = 6;
     const FRAME_CAPTURE_INTERVAL = 0.15;
 
-    // --- TEXT & FEATURE DUPLICATION STATE ---
+    // --- TEXT & FEATURE SCAN STATE ---
     let textCandidateBlocks = [];
     let lastTextScanTime = 0;
-    let trackedFaces = [];
-    let lastFaceScanTime = 0;
 
     // --- SEED & DETERMINISTIC RANDOMIZATION ---
     // mulberry32: fast, high-quality seeded PRNG
@@ -1286,327 +1284,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (candidates.length > 120) candidates.length = 120;
         textCandidateBlocks = candidates;
     }
-
-    // =========================================================================
-    // PERSON & FACIAL LANDMARK DETECTION ENGINE (Pure Canvas / 100% Compatible)
-    // Detects human subjects and extracts precise landmarks: Eyes, Nose, Mouth, Cheeks
-    // =========================================================================
-    function detectPersonFaces(w, h) {
-        if (w < 40 || h < 40) return [];
-        try {
-            const step = Math.max(3, Math.floor(Math.min(w, h) / 130));
-            const imgData = ctx.getImageData(0, 0, w, h);
-            const data = imgData.data;
-
-            const gridW = Math.floor(w / step);
-            const gridH = Math.floor(h / step);
-            const skinGrid = new Uint8Array(gridW * gridH);
-
-            let skinPixelCount = 0;
-            for (let gy = 0; gy < gridH; gy++) {
-                const py = gy * step;
-                for (let gx = 0; gx < gridW; gx++) {
-                    const px = gx * step;
-                    const idx = (py * w + px) * 4;
-                    const r = data[idx];
-                    const g = data[idx + 1];
-                    const b = data[idx + 2];
-
-                    // Combined RGB + YCbCr human skin tone classification across skin tones
-                    const max = Math.max(r, g, b);
-                    const min = Math.min(r, g, b);
-                    const isRgbSkin = (r > 42) && (g > 25) && (b > 15) &&
-                                      (max - min > 10) && (r > g) && (r > b) &&
-                                      (Math.abs(r - g) > 8);
-
-                    const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
-                    const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
-                    const isYcbcrSkin = (cb >= 70 && cb <= 140) && (cr >= 125 && cr <= 185);
-
-                    if (isRgbSkin || isYcbcrSkin) {
-                        skinGrid[gy * gridW + gx] = 1;
-                        skinPixelCount++;
-                    }
-                }
-            }
-
-            if (skinPixelCount < 30) return [];
-
-            // Flood-fill connected skin regions to isolate face/head clusters
-            const clusters = [];
-            const visited = new Uint8Array(gridW * gridH);
-
-            for (let gy = 0; gy < gridH; gy++) {
-                for (let gx = 0; gx < gridW; gx++) {
-                    const gIdx = gy * gridW + gx;
-                    if (skinGrid[gIdx] === 1 && visited[gIdx] === 0) {
-                        let cMinX = gx, cMaxX = gx;
-                        let cMinY = gy, cMaxY = gy;
-                        let count = 0;
-                        const queue = [gx, gy];
-                        visited[gIdx] = 1;
-
-                        let head = 0;
-                        while (head < queue.length) {
-                            const curX = queue[head++];
-                            const curY = queue[head++];
-                            count++;
-
-                            if (curX < cMinX) cMinX = curX;
-                            if (curX > cMaxX) cMaxX = curX;
-                            if (curY < cMinY) cMinY = curY;
-                            if (curY > cMaxY) cMaxY = curY;
-
-                            const neighbors = [
-                                [curX + 1, curY], [curX - 1, curY],
-                                [curX, curY + 1], [curX, curY - 1]
-                            ];
-                            for (const [nx, ny] of neighbors) {
-                                if (nx >= 0 && nx < gridW && ny >= 0 && ny < gridH) {
-                                    const nIdx = ny * gridW + nx;
-                                    if (skinGrid[nIdx] === 1 && visited[nIdx] === 0) {
-                                        visited[nIdx] = 1;
-                                        queue.push(nx, ny);
-                                    }
-                                }
-                            }
-                        }
-
-                        const boxW = (cMaxX - cMinX + 1) * step;
-                        const boxH = (cMaxY - cMinY + 1) * step;
-                        const boxX = cMinX * step;
-                        const boxY = cMinY * step;
-                        const aspect = boxH / Math.max(1, boxW);
-
-                        // Match face proportions: roughly 0.65 to 2.2 aspect ratio, minimum dimension 45px
-                        if (count >= 35 && boxW >= 45 && boxH >= 45 && aspect >= 0.65 && aspect <= 2.2) {
-                            clusters.push({
-                                x: boxX,
-                                y: boxY,
-                                w: boxW,
-                                h: boxH,
-                                count
-                            });
-                        }
-                    }
-                }
-            }
-
-            clusters.sort((a, b) => b.count - a.count);
-            const faces = [];
-
-            for (const c of clusters.slice(0, 3)) {
-                const fx = c.x;
-                const fy = c.y;
-                const fw = c.w;
-                const fh = c.h;
-
-                // Calibrate facial landmark bounding boxes relative to head geometry
-                const eyesRegion = {
-                    left:  { x: Math.round(fx + fw * 0.18), y: Math.round(fy + fh * 0.26), w: Math.round(fw * 0.28), h: Math.round(fh * 0.20) },
-                    right: { x: Math.round(fx + fw * 0.54), y: Math.round(fy + fh * 0.26), w: Math.round(fw * 0.28), h: Math.round(fh * 0.20) }
-                };
-
-                const noseRegion = {
-                    x: Math.round(fx + fw * 0.28),
-                    y: Math.round(fy + fh * 0.42),
-                    w: Math.round(fw * 0.44),
-                    h: Math.round(fh * 0.26)
-                };
-
-                const mouthRegion = {
-                    x: Math.round(fx + fw * 0.22),
-                    y: Math.round(fy + fh * 0.65),
-                    w: Math.round(fw * 0.56),
-                    h: Math.round(fh * 0.22)
-                };
-
-                const leftCheek = {
-                    x: Math.round(fx + fw * 0.04),
-                    y: Math.round(fy + fh * 0.40),
-                    w: Math.round(fw * 0.32),
-                    h: Math.round(fh * 0.38)
-                };
-
-                const rightCheek = {
-                    x: Math.round(fx + fw * 0.64),
-                    y: Math.round(fy + fh * 0.40),
-                    w: Math.round(fw * 0.32),
-                    h: Math.round(fh * 0.38)
-                };
-
-                faces.push({
-                    x: fx, y: fy, w: fw, h: fh,
-                    eyes: eyesRegion,
-                    nose: noseRegion,
-                    mouth: mouthRegion,
-                    leftCheek,
-                    rightCheek
-                });
-            }
-
-            return faces;
-        } catch (e) {
-            console.warn('[FACE SCAN ERROR]', e);
-            return [];
-        }
-    }
-
-    // =========================================================================
-    // BILINEAR SAMPLER FOR PHOTOSHOP-GRADE SMOOTH LIQUIFY WARP
-    // =========================================================================
-    function sampleBilinear(data, w, h, x, y) {
-        const x0 = Math.floor(x);
-        const y0 = Math.floor(y);
-        const x1 = Math.min(w - 1, x0 + 1);
-        const y1 = Math.min(h - 1, y0 + 1);
-        const fx = x - x0;
-        const fy = y - y0;
-
-        const cx0 = Math.max(0, Math.min(w - 1, x0));
-        const cy0 = Math.max(0, Math.min(h - 1, y0));
-
-        const i00 = (cy0 * w + cx0) * 4;
-        const i10 = (cy0 * w + x1) * 4;
-        const i01 = (y1 * w + cx0) * 4;
-        const i11 = (y1 * w + x1) * 4;
-
-        const w00 = (1 - fx) * (1 - fy);
-        const w10 = fx * (1 - fy);
-        const w01 = (1 - fx) * fy;
-        const w11 = fx * fy;
-
-        return [
-            data[i00] * w00 + data[i10] * w10 + data[i01] * w01 + data[i11] * w11,
-            data[i00 + 1] * w00 + data[i10 + 1] * w10 + data[i01 + 1] * w01 + data[i11 + 1] * w11,
-            data[i00 + 2] * w00 + data[i10 + 2] * w10 + data[i01 + 2] * w01 + data[i11 + 2] * w11,
-            data[i00 + 3] * w00 + data[i10 + 3] * w10 + data[i01 + 3] * w01 + data[i11 + 3] * w11
-        ];
-    }
-
-    // =========================================================================
-    // UNCANNY FACIAL MISREMEMBERING MORPH (Photoshop Liquify Forward Smudge)
-    // Seamlessly pulls/smudges the nose, nostril cavity, and upper lip horizontally
-    // across the cheek with continuous bilinear skin interpolation (Kane Pixels effect)
-    // =========================================================================
-    // =========================================================================
-    // UNCANNY FACIAL MISREMEMBERING — CASCADE NOSE STAMP + EYE SHIFT
-    // - Nose is copied 3 times cascading diagonally downward, slightly overlapping
-    // - One eye is nudged upward by a small number of pixels
-    // - All regions are tightly clamped so only the actual nose/eye is extracted
-    // =========================================================================
-    function applyUncannyFaceMorph(face, w, h, intensity, now) {
-        if (!face) return;
-        try {
-            const nose = face.nose;
-            const eyes = face.eyes;
-
-            // ── PASS 1: Cascading Nose Duplication ──────────────────────────
-            // Tightly crop just the nose — no padding expansion that inflates into the whole face
-            // Hard-cap the stamp to 90×70px max so it's the nose, not the whole face
-            const rawNW = nose.w;
-            const rawNH = nose.h;
-            const capNW = Math.min(rawNW, 90);
-            const capNH = Math.min(rawNH, 70);
-
-            // Center the capped region on the nose landmark center
-            const noseCX = nose.x + rawNW * 0.5;
-            const noseCY = nose.y + rawNH * 0.5;
-            const noseRegX = Math.max(0, Math.round(noseCX - capNW * 0.5));
-            const noseRegY = Math.max(0, Math.round(noseCY - capNH * 0.5));
-            const noseRegW = Math.min(w - noseRegX, capNW);
-            const noseRegH = Math.min(h - noseRegY, capNH);
-
-            if (noseRegW > 8 && noseRegH > 8) {
-                const noseCanvas = document.createElement('canvas');
-                noseCanvas.width  = noseRegW;
-                noseCanvas.height = noseRegH;
-                const nCtx = noseCanvas.getContext('2d');
-                nCtx.drawImage(glitchCanvas, noseRegX, noseRegY, noseRegW, noseRegH, 0, 0, noseRegW, noseRegH);
-
-                // Soft oval mask so stamp edges are invisible
-                nCtx.globalCompositeOperation = 'destination-in';
-                const grad = nCtx.createRadialGradient(
-                    noseRegW * 0.5, noseRegH * 0.5, Math.min(noseRegW, noseRegH) * 0.05,
-                    noseRegW * 0.5, noseRegH * 0.5, Math.min(noseRegW, noseRegH) * 0.55
-                );
-                grad.addColorStop(0,   'rgba(0,0,0,1)');
-                grad.addColorStop(0.55,'rgba(0,0,0,0.90)');
-                grad.addColorStop(1,   'rgba(0,0,0,0)');
-                nCtx.fillStyle = grad;
-                nCtx.fillRect(0, 0, noseRegW, noseRegH);
-
-                // Each copy steps: a little rightward + mostly downward (diagonal cascade)
-                // stepX/Y are in pixels, NOT multiples of the stamp size
-                const stepX = Math.round(noseRegW * 0.22);   // ~20% of stamp width rightward
-                const stepY = Math.round(noseRegH * 0.80);   // ~80% of stamp height downward = slight overlap
-
-                const numCopies = 3;
-                for (let i = 1; i <= numCopies; i++) {
-                    const destX = noseRegX + stepX * i;
-                    const destY = noseRegY + stepY * i;
-                    const alpha = Math.max(0.08, 0.72 - i * 0.20); // 0.52, 0.32, 0.12
-
-                    if (destX > w || destY > h) continue;
-
-                    ctx.save();
-                    ctx.globalAlpha = alpha;
-                    // Very slight tilt that accumulates — looks naturally diagonal, not robotic
-                    ctx.translate(destX + noseRegW * 0.5, destY + noseRegH * 0.5);
-                    ctx.rotate(-0.07 * i);
-                    ctx.drawImage(noseCanvas, -noseRegW * 0.5, -noseRegH * 0.5);
-                    ctx.restore();
-                }
-            }
-
-            // ── PASS 2: Asymmetric Eye Lift ──────────────────────────────────
-            // Pick the more visible/larger eye; hard-cap stamp size so it's just the eye socket
-            const leftArea  = eyes.left.w  * eyes.left.h;
-            const rightArea = eyes.right.w * eyes.right.h;
-            const srcEye    = leftArea >= rightArea ? eyes.left : eyes.right;
-
-            // Hard-cap to max 80×40px so we never accidentally grab half the face
-            const capEW = Math.min(srcEye.w, 80);
-            const capEH = Math.min(srcEye.h, 40);
-            const eyeCX = srcEye.x + srcEye.w * 0.5;
-            const eyeCY = srcEye.y + srcEye.h * 0.5;
-            const ex = Math.max(0, Math.round(eyeCX - capEW * 0.5));
-            const ey = Math.max(0, Math.round(eyeCY - capEH * 0.5));
-            const ew = Math.min(w - ex, capEW);
-            const eh = Math.min(h - ey, capEH);
-
-            if (ew > 8 && eh > 8) {
-                const eyeCanvas = document.createElement('canvas');
-                eyeCanvas.width  = ew;
-                eyeCanvas.height = eh;
-                const eCtx = eyeCanvas.getContext('2d');
-                eCtx.drawImage(glitchCanvas, ex, ey, ew, eh, 0, 0, ew, eh);
-
-                // Soft oval blend mask
-                eCtx.globalCompositeOperation = 'destination-in';
-                const eGrad = eCtx.createRadialGradient(
-                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.05,
-                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.50
-                );
-                eGrad.addColorStop(0,   'rgba(0,0,0,1)');
-                eGrad.addColorStop(0.6, 'rgba(0,0,0,0.85)');
-                eGrad.addColorStop(1,   'rgba(0,0,0,0)');
-                eCtx.fillStyle = eGrad;
-                eCtx.fillRect(0, 0, ew, eh);
-
-                // Lift upward by a fixed small number of pixels (not a percentage of a giant region)
-                const liftPx = Math.round(eh * 0.5); // lift by half the eye height
-
-                ctx.save();
-                ctx.globalAlpha = 0.88;
-                ctx.drawImage(eyeCanvas, ex, ey - liftPx);
-                ctx.restore();
-            }
-
-        } catch (e) {
-            console.warn('[FACE MORPH ERR]', e);
-        }
-    }
+    // (Salience scanning complete - feeds directly into Entity Memory Model)
 
     // ─── CORE SYSTEM: ENTITY MEMORY MODEL (Per-Entity Drift, Duplication, Rotation, & Erasure) ───
     let memoryEntities = [];
@@ -2717,38 +2395,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const dt = now - lastFrameTimeMs;
         lastFrameTimeMs = now;
 
-        // Periodic Face & Person Scan (every 300ms)
-        if (now - lastFaceScanTime > 300) {
-            lastFaceScanTime = now;
-            trackedFaces = detectPersonFaces(w, h);
-        }
-
         const isDegrading = toggleMemoryDegrading && toggleMemoryDegrading.checked;
 
         // --- UNCANNY ANOMALY PROCESSING (WARPING OR MEMORY DEGRADATION) ---
         if (isWarpingActive || isDegrading) {
-            // 1. PERSON / FACE ANOMALY: If a human is on screen, apply authentic Kane Pixels facial morphing
-            if (trackedFaces.length > 0 && masterVal > 0.04) {
-                for (const face of trackedFaces) {
-                    applyUncannyFaceMorph(face, w, h, masterVal, now);
-                }
-            } else {
-                // 2. ENVIRONMENT ANOMALIES: For rooms, hallways, furniture, apply subtle regional memory drift
-                const numRegions = 1 + (masterVal > 0.7 ? 1 : 0);
-                for (let ri = 0; ri < numRegions; ri++) {
-                    const rw = Math.floor(w * (0.20 + Math.random() * 0.25));
-                    const rh = Math.floor(h * (0.20 + Math.random() * 0.25));
-                    const rx = Math.floor(Math.random() * (w - rw));
-                    const ry = Math.floor(Math.random() * (h - rh));
+            // Regional Memory Drift: For rooms, hallways, wallpaper, furniture, apply subtle regional memory drift
+            const numRegions = 1 + (masterVal > 0.7 ? 1 : 0);
+            for (let ri = 0; ri < numRegions; ri++) {
+                const rw = Math.floor(w * (0.20 + Math.random() * 0.25));
+                const rh = Math.floor(h * (0.20 + Math.random() * 0.25));
+                const rx = Math.floor(Math.random() * (w - rw));
+                const ry = Math.floor(Math.random() * (h - rh));
 
-                    const opRoll = (ri + Math.floor(now / 700)) % 3;
-                    if (opRoll === 0) applyPixelSmearRegion(rx, ry, rw, rh, masterVal, now);
-                    else if (opRoll === 1) applyTextSagRegion(rx, ry, rw, rh, masterVal, now);
-                    else if (opRoll === 2 && Math.random() < 0.4) applyBlockEchoRegion(rx, ry, rw, rh, masterVal, now);
-                }
+                const opRoll = (ri + Math.floor(now / 700)) % 3;
+                if (opRoll === 0) applyPixelSmearRegion(rx, ry, rw, rh, masterVal, now);
+                else if (opRoll === 1) applyTextSagRegion(rx, ry, rw, rh, masterVal, now);
+                else if (opRoll === 2 && Math.random() < 0.4) applyBlockEchoRegion(rx, ry, rw, rh, masterVal, now);
             }
-
-            if (frameRng() < 0.08 * masterVal) applyObjectStretch(w, h, masterVal, now);
 
             if (flawedMirrorVal > 0 && frameRng() < 0.04) {
                 applyFlawedInPlaceMirroring(w, h, flawedMirrorVal, now);
@@ -2772,15 +2435,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 scanForTextCandidates(w, h);
             }
             if (masterVal > 0.05) {
-                // If faces are present, filter out text candidate blocks inside face bounding boxes
-                if (trackedFaces.length > 0) {
-                    textCandidateBlocks = textCandidateBlocks.filter(b => {
-                        return !trackedFaces.some(f => 
-                            b.x < f.x + f.w && b.x + b.w > f.x &&
-                            b.y < f.y + f.h && b.y + b.h > f.y
-                        );
-                    });
-                }
                 applyMisrememberedTextGlitch(w, h, flawedMirrorVal, now);
                 if (frameRng() < 0.85 * Math.min(1.0, masterVal)) applyPosterBandMelt(w, h, now);
             }
@@ -3089,69 +2743,53 @@ document.addEventListener('DOMContentLoaded', () => {
             const flawedMirrorVal = getSliderValue(flawedMirroringSlider, 80);
             const chromaticPx = getSliderValue(chromaticAberrationSlider, 28);
 
-            // 2. Detect Human Subjects & Facial Landmarks
-            const detectedPersons = detectPersonFaces(w, h);
+            // Entity Memory Model: scan image for salient features
+            initializeMemoryEntities(w, h);
+            scanForTextCandidates(w, h);
 
-            if (detectedPersons.length > 0) {
-                console.log(`%c[IMAGE ENGINE] Detected ${detectedPersons.length} human subject(s) — applying Photoshop-grade Liquify Facial Smear`, 'color: #38ef7d; font-weight: bold;');
-                addLog(`[PERSON DETECTED] Uncanny facial anatomical reconstruction active on ${detectedPersons.length} subject(s)`, 'alert');
+            if (textCandidateBlocks.length > 0) {
+                const numDuplications = 2 + Math.floor(Math.random() * 3);
+                for (let d = 0; d < numDuplications; d++) {
+                    const block = textCandidateBlocks[Math.floor(Math.random() * textCandidateBlocks.length)];
+                    if (!block) continue;
 
-                // Apply Photoshop-grade Liquify Facial Morph to each detected human face
-                for (const face of detectedPersons) {
-                    applyUncannyFaceMorph(face, w, h, masterVal, performance.now());
-                }
-            } else {
-                console.log('[IMAGE ENGINE] Non-human / Environment subject — applying Entity Memory Model');
-                // Entity Memory Model: scan image for salient features (furniture, fixtures, doors, wallpaper)
-                initializeMemoryEntities(w, h);
-                scanForTextCandidates(w, h);
+                    const featureW = Math.min(w - block.x, Math.max(32, block.w * 2.5));
+                    const featureH = Math.min(h - block.y, Math.max(28, block.h * 2.5));
+                    const fx = Math.max(0, block.x - Math.floor(block.w * 0.4));
+                    const fy = Math.max(0, block.y - Math.floor(block.h * 0.4));
+                    const dx = fx + (12 + Math.random() * 35);
+                    const dy = fy + (15 + Math.random() * 40);
+                    const angle = (Math.random() - 0.5) * 0.25;
 
-                if (textCandidateBlocks.length > 0) {
-                    const numDuplications = 2 + Math.floor(Math.random() * 3);
-                    for (let d = 0; d < numDuplications; d++) {
-                        const block = textCandidateBlocks[Math.floor(Math.random() * textCandidateBlocks.length)];
-                        if (!block) continue;
+                    const offCanvas = document.createElement('canvas');
+                    offCanvas.width = featureW;
+                    offCanvas.height = featureH;
+                    const offCtx = offCanvas.getContext('2d');
+                    offCtx.drawImage(glitchCanvas, fx, fy, featureW, featureH, 0, 0, featureW, featureH);
 
-                        const featureW = Math.min(w - block.x, Math.max(32, block.w * 2.5));
-                        const featureH = Math.min(h - block.y, Math.max(28, block.h * 2.5));
-                        const fx = Math.max(0, block.x - Math.floor(block.w * 0.4));
-                        const fy = Math.max(0, block.y - Math.floor(block.h * 0.4));
-                        const dx = fx + (12 + Math.random() * 35);
-                        const dy = fy + (15 + Math.random() * 40);
-                        const angle = (Math.random() - 0.5) * 0.25;
+                    offCtx.globalCompositeOperation = 'destination-in';
+                    const grad = offCtx.createRadialGradient(
+                        featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.15,
+                        featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.5
+                    );
+                    grad.addColorStop(0, 'rgba(0,0,0,1)');
+                    grad.addColorStop(0.7, 'rgba(0,0,0,0.85)');
+                    grad.addColorStop(1, 'rgba(0,0,0,0)');
+                    offCtx.fillStyle = grad;
+                    offCtx.fillRect(0, 0, featureW, featureH);
 
-                        const offCanvas = document.createElement('canvas');
-                        offCanvas.width = featureW;
-                        offCanvas.height = featureH;
-                        const offCtx = offCanvas.getContext('2d');
-                        offCtx.drawImage(glitchCanvas, fx, fy, featureW, featureH, 0, 0, featureW, featureH);
-
-                        offCtx.globalCompositeOperation = 'destination-in';
-                        const grad = offCtx.createRadialGradient(
-                            featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.15,
-                            featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.5
-                        );
-                        grad.addColorStop(0, 'rgba(0,0,0,1)');
-                        grad.addColorStop(0.7, 'rgba(0,0,0,0.85)');
-                        grad.addColorStop(1, 'rgba(0,0,0,0)');
-                        offCtx.fillStyle = grad;
-                        offCtx.fillRect(0, 0, featureW, featureH);
-
-                        ctx.save();
-                        ctx.translate(dx + featureW / 2, dy + featureH / 2);
-                        ctx.rotate(angle);
-                        ctx.globalAlpha = 0.85;
-                        ctx.drawImage(offCanvas, -featureW / 2, -featureH / 2);
-                        ctx.restore();
-                    }
-                }
-
-                if (toggleMisrememberedText && toggleMisrememberedText.checked) {
-                    applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
+                    ctx.save();
+                    ctx.translate(dx + featureW / 2, dy + featureH / 2);
+                    ctx.rotate(angle);
+                    ctx.globalAlpha = 0.85;
+                    ctx.drawImage(offCanvas, -featureW / 2, -featureH / 2);
+                    ctx.restore();
                 }
             }
 
-            // (No chromatic aberration on portraits — it causes rainbow color banding)
+            if (toggleMisrememberedText && toggleMisrememberedText.checked) {
+                applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
+            }
 
             // 7. Enable Snapshot and Preview Downloads
             btnSnapshotImage.disabled = false;
@@ -3328,47 +2966,6 @@ document.addEventListener('DOMContentLoaded', () => {
     function applyTextSag(w, h, masterVal, now) { applyTextSagRegion(0, 0, w, h, masterVal, now); }
     function applyBlockEcho(w, h, masterVal, now) { applyBlockEchoRegion(0, 0, w, h, masterVal, now); }
     function applyPixelSort(w, h, masterVal) { applyPixelSortRegion(0, 0, w, h, masterVal); }
-
-    // Backrooms Object & Architecture Vertical Stretch
-    // Inspired by Kane Pixels Backrooms geometry anomalies (e.g. chairs/walls unnaturally tall/stretched upwards)
-    function applyObjectStretch(w, h, masterVal, now) {
-        try {
-            const numStretches = 1 + Math.floor(masterVal * 3);
-            for (let s = 0; s < numStretches; s++) {
-                // Select a bounding region (e.g. an object, chair, wall segment, or face)
-                const rw = Math.floor(w * (0.15 + Math.random() * 0.35));
-                const rh = Math.floor(h * (0.20 + Math.random() * 0.40));
-                const rx = Math.floor(Math.random() * (w - rw));
-                const ry = Math.floor(Math.random() * (h - rh));
-
-                // 70% probability vertical extreme stretch (like Backrooms high-back chairs/tall walls)
-                const stretchAxis = Math.random() < 0.70 ? 'v' : 'h';
-                const stretchMult = 2.0 + Math.random() * 3.5; // 2x to 5.5x stretch
-
-                let dstW = rw;
-                let dstH = rh;
-                let drawY = ry;
-                let drawX = rx;
-
-                if (stretchAxis === 'v') {
-                    dstH = Math.min(h, Math.floor(rh * stretchMult));
-                    // Stretch upwards from origin
-                    drawY = Math.max(0, ry - (dstH - rh));
-                } else {
-                    dstW = Math.min(w, Math.floor(rw * stretchMult));
-                    drawX = Math.max(0, rx - Math.floor((dstW - rw) / 2));
-                }
-
-                ctx.save();
-                ctx.beginPath();
-                ctx.rect(drawX, drawY, dstW, dstH);
-                ctx.clip();
-                ctx.globalAlpha = 0.92;
-                ctx.drawImage(glitchCanvas, rx, ry, rw, rh, drawX, drawY, dstW, dstH);
-                ctx.restore();
-            }
-        } catch (e) {}
-    }
 
     // AUTHENTIC ANALOG TAPE WARMTH (Subtle VHS Luma/Chroma drift - NO RAINBOW / NEON GLITCH)
     function applyAnalogTapeWarmth(w, h, masterVal) {
@@ -3646,8 +3243,6 @@ document.addEventListener('DOMContentLoaded', () => {
         insertedEntities = [];
         globalDecayLevel = 0;
         _lastEntityDecayTime = 0;
-        trackedFaces = [];
-        lastFaceScanTime = 0;
 
         // Clear canvas
         ctx.clearRect(0, 0, glitchCanvas.width, glitchCanvas.height);
