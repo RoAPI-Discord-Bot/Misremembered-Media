@@ -265,6 +265,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- TEXT & FEATURE DUPLICATION STATE ---
     let textCandidateBlocks = [];
     let lastTextScanTime = 0;
+    let trackedFaces = [];
+    let lastFaceScanTime = 0;
 
     // --- SEED & DETERMINISTIC RANDOMIZATION ---
     // mulberry32: fast, high-quality seeded PRNG
@@ -1285,6 +1287,297 @@ document.addEventListener('DOMContentLoaded', () => {
         textCandidateBlocks = candidates;
     }
 
+    // =========================================================================
+    // PERSON & FACIAL LANDMARK DETECTION ENGINE (Pure Canvas / 100% Compatible)
+    // Detects human subjects and extracts precise landmarks: Eyes, Nose, Mouth, Cheeks
+    // =========================================================================
+    function detectPersonFaces(w, h) {
+        if (w < 40 || h < 40) return [];
+        try {
+            const step = Math.max(3, Math.floor(Math.min(w, h) / 130));
+            const imgData = ctx.getImageData(0, 0, w, h);
+            const data = imgData.data;
+
+            const gridW = Math.floor(w / step);
+            const gridH = Math.floor(h / step);
+            const skinGrid = new Uint8Array(gridW * gridH);
+
+            let skinPixelCount = 0;
+            for (let gy = 0; gy < gridH; gy++) {
+                const py = gy * step;
+                for (let gx = 0; gx < gridW; gx++) {
+                    const px = gx * step;
+                    const idx = (py * w + px) * 4;
+                    const r = data[idx];
+                    const g = data[idx + 1];
+                    const b = data[idx + 2];
+
+                    // Combined RGB + YCbCr human skin tone classification across skin tones
+                    const max = Math.max(r, g, b);
+                    const min = Math.min(r, g, b);
+                    const isRgbSkin = (r > 42) && (g > 25) && (b > 15) &&
+                                      (max - min > 10) && (r > g) && (r > b) &&
+                                      (Math.abs(r - g) > 8);
+
+                    const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+                    const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+                    const isYcbcrSkin = (cb >= 70 && cb <= 140) && (cr >= 125 && cr <= 185);
+
+                    if (isRgbSkin || isYcbcrSkin) {
+                        skinGrid[gy * gridW + gx] = 1;
+                        skinPixelCount++;
+                    }
+                }
+            }
+
+            if (skinPixelCount < 30) return [];
+
+            // Flood-fill connected skin regions to isolate face/head clusters
+            const clusters = [];
+            const visited = new Uint8Array(gridW * gridH);
+
+            for (let gy = 0; gy < gridH; gy++) {
+                for (let gx = 0; gx < gridW; gx++) {
+                    const gIdx = gy * gridW + gx;
+                    if (skinGrid[gIdx] === 1 && visited[gIdx] === 0) {
+                        let cMinX = gx, cMaxX = gx;
+                        let cMinY = gy, cMaxY = gy;
+                        let count = 0;
+                        const queue = [gx, gy];
+                        visited[gIdx] = 1;
+
+                        let head = 0;
+                        while (head < queue.length) {
+                            const curX = queue[head++];
+                            const curY = queue[head++];
+                            count++;
+
+                            if (curX < cMinX) cMinX = curX;
+                            if (curX > cMaxX) cMaxX = curX;
+                            if (curY < cMinY) cMinY = curY;
+                            if (curY > cMaxY) cMaxY = curY;
+
+                            const neighbors = [
+                                [curX + 1, curY], [curX - 1, curY],
+                                [curX, curY + 1], [curX, curY - 1]
+                            ];
+                            for (const [nx, ny] of neighbors) {
+                                if (nx >= 0 && nx < gridW && ny >= 0 && ny < gridH) {
+                                    const nIdx = ny * gridW + nx;
+                                    if (skinGrid[nIdx] === 1 && visited[nIdx] === 0) {
+                                        visited[nIdx] = 1;
+                                        queue.push(nx, ny);
+                                    }
+                                }
+                            }
+                        }
+
+                        const boxW = (cMaxX - cMinX + 1) * step;
+                        const boxH = (cMaxY - cMinY + 1) * step;
+                        const boxX = cMinX * step;
+                        const boxY = cMinY * step;
+                        const aspect = boxH / Math.max(1, boxW);
+
+                        // Match face proportions: roughly 0.65 to 2.2 aspect ratio, minimum dimension 45px
+                        if (count >= 35 && boxW >= 45 && boxH >= 45 && aspect >= 0.65 && aspect <= 2.2) {
+                            clusters.push({
+                                x: boxX,
+                                y: boxY,
+                                w: boxW,
+                                h: boxH,
+                                count
+                            });
+                        }
+                    }
+                }
+            }
+
+            clusters.sort((a, b) => b.count - a.count);
+            const faces = [];
+
+            for (const c of clusters.slice(0, 3)) {
+                const fx = c.x;
+                const fy = c.y;
+                const fw = c.w;
+                const fh = c.h;
+
+                // Calibrate facial landmark bounding boxes relative to head geometry
+                const eyesRegion = {
+                    left:  { x: Math.round(fx + fw * 0.18), y: Math.round(fy + fh * 0.26), w: Math.round(fw * 0.28), h: Math.round(fh * 0.20) },
+                    right: { x: Math.round(fx + fw * 0.54), y: Math.round(fy + fh * 0.26), w: Math.round(fw * 0.28), h: Math.round(fh * 0.20) }
+                };
+
+                const noseRegion = {
+                    x: Math.round(fx + fw * 0.28),
+                    y: Math.round(fy + fh * 0.42),
+                    w: Math.round(fw * 0.44),
+                    h: Math.round(fh * 0.26)
+                };
+
+                const mouthRegion = {
+                    x: Math.round(fx + fw * 0.22),
+                    y: Math.round(fy + fh * 0.65),
+                    w: Math.round(fw * 0.56),
+                    h: Math.round(fh * 0.22)
+                };
+
+                const leftCheek = {
+                    x: Math.round(fx + fw * 0.04),
+                    y: Math.round(fy + fh * 0.40),
+                    w: Math.round(fw * 0.32),
+                    h: Math.round(fh * 0.38)
+                };
+
+                const rightCheek = {
+                    x: Math.round(fx + fw * 0.64),
+                    y: Math.round(fy + fh * 0.40),
+                    w: Math.round(fw * 0.32),
+                    h: Math.round(fh * 0.38)
+                };
+
+                faces.push({
+                    x: fx, y: fy, w: fw, h: fh,
+                    eyes: eyesRegion,
+                    nose: noseRegion,
+                    mouth: mouthRegion,
+                    leftCheek,
+                    rightCheek
+                });
+            }
+
+            return faces;
+        } catch (e) {
+            console.warn('[FACE SCAN ERROR]', e);
+            return [];
+        }
+    }
+
+    // =========================================================================
+    // UNCANNY FACIAL MISREMEMBERING MORPH (Kane Pixels Organic Smear Effect)
+    // Slices and elongates nose & mouth horizontally into the cheek with seamless skin blending
+    // =========================================================================
+    function applyUncannyFaceMorph(face, w, h, intensity, now) {
+        if (!face) return;
+        try {
+            const fx = face.x;
+            const fy = face.y;
+            const fw = face.w;
+            const fh = face.h;
+
+            const nose = face.nose;
+            const mouth = face.mouth;
+
+            // Bounding zone covering nose bridge down through mouth
+            const zoneX = Math.max(0, Math.min(w - 20, nose.x - Math.floor(nose.w * 0.15)));
+            const zoneY = Math.max(0, Math.min(h - 20, nose.y));
+            const zoneW = Math.min(w - zoneX, Math.max(20, Math.floor(nose.w * 1.3)));
+            const zoneH = Math.min(h - zoneY, Math.max(20, Math.floor((mouth.y + mouth.h) - nose.y)));
+
+            if (zoneW > 10 && zoneH > 10) {
+                // Determine drift direction towards the cheek
+                const preferRight = (face.rightCheek.w >= face.leftCheek.w);
+                const dirSign = preferRight ? 1 : -1;
+                const shiftDist = Math.round(fw * (0.22 + Math.min(0.28, (intensity || 0.8) * 0.20)) * dirSign);
+
+                // --- PASS A: Pixel-level smooth horizontal elongation into the cheek ---
+                const cheekZoneX = dirSign > 0 
+                    ? Math.max(0, Math.min(w - 10, zoneX)) 
+                    : Math.max(0, Math.min(w - 10, zoneX + shiftDist));
+                const cheekZoneW = Math.min(w - cheekZoneX, Math.max(30, zoneW + Math.abs(shiftDist) + 20));
+                const cheekZoneY = zoneY;
+                const cheekZoneH = zoneH;
+
+                if (cheekZoneW > 15 && cheekZoneH > 15 && cheekZoneX + cheekZoneW <= w && cheekZoneY + cheekZoneH <= h) {
+                    const imgData = ctx.getImageData(cheekZoneX, cheekZoneY, cheekZoneW, cheekZoneH);
+                    const src = new Uint8ClampedArray(imgData.data);
+                    const dst = imgData.data;
+
+                    for (let cy = 0; cy < cheekZoneH; cy++) {
+                        // Smooth bell curve envelope centered on the nostrils / upper lip
+                        const relY = cy / cheekZoneH;
+                        const envelope = Math.sin(relY * Math.PI); // peak in the middle (nostrils/mouth)
+                        const rowShift = Math.round(shiftDist * envelope);
+
+                        for (let cx = 0; cx < cheekZoneW; cx++) {
+                            const di = (cy * cheekZoneW + cx) * 4;
+                            let srcX = cx - rowShift;
+                            if (srcX >= 0 && srcX < cheekZoneW) {
+                                const si = (cy * cheekZoneW + srcX) * 4;
+                                const blend = 0.72 + 0.28 * envelope;
+                                dst[di]     = Math.round(src[si]     * blend + src[di]     * (1 - blend));
+                                dst[di + 1] = Math.round(src[si + 1] * blend + src[di + 1] * (1 - blend));
+                                dst[di + 2] = Math.round(src[si + 2] * blend + src[di + 2] * (1 - blend));
+                            }
+                        }
+                    }
+                    ctx.putImageData(imgData, cheekZoneX, cheekZoneY);
+                }
+
+                // --- PASS B: Soft-feathered ghost nostril & mouth contour stamp ---
+                const offNose = document.createElement('canvas');
+                offNose.width = zoneW;
+                offNose.height = zoneH;
+                const offCtx = offNose.getContext('2d');
+                offCtx.drawImage(glitchCanvas, zoneX, zoneY, zoneW, zoneH, 0, 0, zoneW, zoneH);
+
+                // Feather edges with smooth radial gradient (destination-in)
+                offCtx.globalCompositeOperation = 'destination-in';
+                const grad = offCtx.createRadialGradient(
+                    zoneW * 0.5, zoneH * 0.5, Math.min(zoneW, zoneH) * 0.15,
+                    zoneW * 0.5, zoneH * 0.5, Math.min(zoneW, zoneH) * 0.52
+                );
+                grad.addColorStop(0, 'rgba(0,0,0,1)');
+                grad.addColorStop(0.65, 'rgba(0,0,0,0.85)');
+                grad.addColorStop(1, 'rgba(0,0,0,0)');
+                offCtx.fillStyle = grad;
+                offCtx.fillRect(0, 0, zoneW, zoneH);
+
+                // Stamp ghost nostril / mouth across the cheek seamlessly
+                ctx.save();
+                ctx.globalAlpha = 0.78;
+                ctx.drawImage(offNose, zoneX + Math.round(shiftDist * 0.85), zoneY + Math.round((Math.random() - 0.5) * 4));
+                ctx.restore();
+            }
+
+            // 2. UNCANNY ASYMMETRICAL EYE DRIFT
+            // Subtly offsets one eye with soft radial feathering, creating a wrong gaze
+            const targetEye = (Math.random() < 0.5) ? face.eyes.right : face.eyes.left;
+            const ex = Math.max(0, Math.min(w - 10, targetEye.x));
+            const ey = Math.max(0, Math.min(h - 10, targetEye.y));
+            const ew = Math.min(w - ex, Math.max(10, targetEye.w));
+            const eh = Math.min(h - ey, Math.max(10, targetEye.h));
+
+            if (ew > 10 && eh > 10) {
+                const offEye = document.createElement('canvas');
+                offEye.width = ew;
+                offEye.height = eh;
+                const eCtx = offEye.getContext('2d');
+                eCtx.drawImage(glitchCanvas, ex, ey, ew, eh, 0, 0, ew, eh);
+
+                eCtx.globalCompositeOperation = 'destination-in';
+                const eGrad = eCtx.createRadialGradient(
+                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.10,
+                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.48
+                );
+                eGrad.addColorStop(0, 'rgba(0,0,0,1)');
+                eGrad.addColorStop(0.70, 'rgba(0,0,0,0.80)');
+                eGrad.addColorStop(1, 'rgba(0,0,0,0)');
+                eCtx.fillStyle = eGrad;
+                eCtx.fillRect(0, 0, ew, eh);
+
+                const eyeShiftX = (Math.random() - 0.4) * 8;
+                const eyeShiftY = (Math.random() - 0.5) * 6;
+
+                ctx.save();
+                ctx.globalAlpha = 0.82;
+                ctx.drawImage(offEye, ex + eyeShiftX, ey + eyeShiftY);
+                ctx.restore();
+            }
+        } catch (e) {
+            console.warn('[FACE MORPH ERR]', e);
+        }
+    }
+
     // ─── CORE SYSTEM: ENTITY MEMORY MODEL (Per-Entity Drift, Duplication, Rotation, & Erasure) ───
     let memoryEntities = [];
     let insertedEntities = [];
@@ -1949,9 +2242,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         ctx.putImageData(imgData, 0, 0);
 
-        // Heavy horizontal scanlines (every 2px)
-        for (let y = 0; y < h; y += 2) {
-            ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        // Subtle horizontal analog raster
+        for (let y = 0; y < h; y += 4) {
+            ctx.fillStyle = 'rgba(0,0,0,0.05)';
             ctx.fillRect(0, y, w, 1);
         }
 
@@ -2216,9 +2509,9 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.fillStyle = `rgba(255,255,255,${0.06 + Math.random() * 0.10})`;
         const bandY = Math.random() * h;
         ctx.fillRect(0, bandY, w, 4 + Math.random() * 14);
-        // Heavy scanlines
-        for (let y = 0; y < h; y += 2) {
-            ctx.fillStyle = 'rgba(0,0,0,0.28)';
+        // Subtle analog scanlines
+        for (let y = 0; y < h; y += 4) {
+            ctx.fillStyle = 'rgba(0,0,0,0.05)';
             ctx.fillRect(0, y, w, 1);
         }
     }
@@ -2394,25 +2687,40 @@ document.addEventListener('DOMContentLoaded', () => {
         const dt = now - lastFrameTimeMs;
         lastFrameTimeMs = now;
 
-        if (isWarpingActive) {
-            const numRegions = 2 + (masterVal > 0.7 ? 1 : 0);
-            for (let ri = 0; ri < numRegions; ri++) {
-                const rw = Math.floor(w * (0.25 + Math.random() * 0.35));
-                const rh = Math.floor(h * (0.25 + Math.random() * 0.35));
-                const rx = Math.floor(Math.random() * (w - rw));
-                const ry = Math.floor(Math.random() * (h - rh));
+        // Periodic Face & Person Scan (every 300ms)
+        if (now - lastFaceScanTime > 300) {
+            lastFaceScanTime = now;
+            trackedFaces = detectPersonFaces(w, h);
+        }
 
-                const opRoll = (ri + Math.floor(now / 600)) % 4;
-                if (opRoll === 0) applyPixelSmearRegion(rx, ry, rw, rh, masterVal, now);
-                else if (opRoll === 1) applyTextSagRegion(rx, ry, rw, rh, masterVal, now);
-                else if (opRoll === 2 && Math.random() < 0.5) applyBlockEchoRegion(rx, ry, rw, rh, masterVal, now);
-                else if (opRoll === 3 && Math.random() < 0.45) applyPixelSortRegion(rx, ry, rw, rh, masterVal);
+        const isDegrading = toggleMemoryDegrading && toggleMemoryDegrading.checked;
+
+        // --- UNCANNY ANOMALY PROCESSING (WARPING OR MEMORY DEGRADATION) ---
+        if (isWarpingActive || isDegrading) {
+            // 1. PERSON / FACE ANOMALY: If a human is on screen, apply authentic Kane Pixels facial morphing
+            if (trackedFaces.length > 0 && masterVal > 0.04) {
+                for (const face of trackedFaces) {
+                    applyUncannyFaceMorph(face, w, h, masterVal, now);
+                }
+            } else {
+                // 2. ENVIRONMENT ANOMALIES: For rooms, hallways, furniture, apply subtle regional memory drift
+                const numRegions = 1 + (masterVal > 0.7 ? 1 : 0);
+                for (let ri = 0; ri < numRegions; ri++) {
+                    const rw = Math.floor(w * (0.20 + Math.random() * 0.25));
+                    const rh = Math.floor(h * (0.20 + Math.random() * 0.25));
+                    const rx = Math.floor(Math.random() * (w - rw));
+                    const ry = Math.floor(Math.random() * (h - rh));
+
+                    const opRoll = (ri + Math.floor(now / 700)) % 3;
+                    if (opRoll === 0) applyPixelSmearRegion(rx, ry, rw, rh, masterVal, now);
+                    else if (opRoll === 1) applyTextSagRegion(rx, ry, rw, rh, masterVal, now);
+                    else if (opRoll === 2 && Math.random() < 0.4) applyBlockEchoRegion(rx, ry, rw, rh, masterVal, now);
+                }
             }
 
-            applyRandomColorBurst(w, h, chromaticPx, masterVal, now);
-            if (frameRng() < 0.15) applyRealityTear(w, h, masterVal);
-            if (frameRng() < 0.12) applyObjectStretch(w, h, masterVal, now);
-            if (flawedMirrorVal > 0 && frameRng() < 0.05) {
+            if (frameRng() < 0.08 * masterVal) applyObjectStretch(w, h, masterVal, now);
+
+            if (flawedMirrorVal > 0 && frameRng() < 0.04) {
                 applyFlawedInPlaceMirroring(w, h, flawedMirrorVal, now);
                 if (pannerNode && audioCtx) {
                     spatialMonoUntil = now + 700;
@@ -2429,38 +2737,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // TEXT DISTORTION: scaled by masterVal when memory degrading is active
         if (toggleMisrememberedText && toggleMisrememberedText.checked) {
-            if (now - lastTextScanTime > 150) {
+            if (now - lastTextScanTime > 200) {
                 lastTextScanTime = now;
                 scanForTextCandidates(w, h);
             }
             if (masterVal > 0.05) {
-                applyMisrememberedTextGlitch(w, h, flawedMirrorVal, now);
-                if (frameRng() < 0.92 * Math.min(1.0, masterVal)) applyPosterBandMelt(w, h, now);
-            }
-        } else if ((isWarpingActive || (toggleMemoryDegrading && toggleMemoryDegrading.checked)) && now - lastTextScanTime > 200) {
-            // Always maintain region data for face/object melt even if text distortion toggle is off
-            lastTextScanTime = now;
-            scanForTextCandidates(w, h);
-        }
-
-        // FACE / OBJECT MELT: apply column drip and geometry shear during warp windows
-        // (Always-on in memory decay, brief bursts in normal mode)
-        const isDegrading = toggleMemoryDegrading && toggleMemoryDegrading.checked;
-        if (isWarpingActive || isDegrading) {
-            if (textCandidateBlocks.length > 0 && masterVal > 0.05) {
-                // Pick 1-2 detected face/object regions and melt them
-                const numMelts = 1 + (masterVal > 0.6 ? 1 : 0);
-                for (let m = 0; m < numMelts; m++) {
-                    const blk = textCandidateBlocks[Math.floor(Math.random() * textCandidateBlocks.length)];
-                    if (!blk) continue;
-                    const mx = Math.max(0, blk.x - blk.w);
-                    const my = Math.max(0, blk.y - blk.h);
-                    const mw = Math.min(w - mx, blk.w * 4);
-                    const mh = Math.min(h - my, blk.h * 4);
-                    applyFaceColumnMelt(mx, my, mw, mh, masterVal, now);
+                // If faces are present, filter out text candidate blocks inside face bounding boxes
+                if (trackedFaces.length > 0) {
+                    textCandidateBlocks = textCandidateBlocks.filter(b => {
+                        return !trackedFaces.some(f => 
+                            b.x < f.x + f.w && b.x + b.w > f.x &&
+                            b.y < f.y + f.h && b.y + b.h > f.y
+                        );
+                    });
                 }
+                applyMisrememberedTextGlitch(w, h, flawedMirrorVal, now);
+                if (frameRng() < 0.85 * Math.min(1.0, masterVal)) applyPosterBandMelt(w, h, now);
             }
-            // Geometry shear replaced by Entity Memory Model per-entity drift
         }
 
         // FINAL DEGRADATION BREAKDOWN: In the last 15% of playback, apply extreme visual+audio destruction
@@ -2629,8 +2922,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 float g = texture2D(u_image, uv).g;
                 float b = texture2D(u_image, vec2(uv.x - shift, uv.y)).b;
 
-                // Subtle Liminal CRT Scanline Haze
-                float scanline = sin(uv.y * u_resolution.y * 1.2) * 0.035;
+                // Subtle Liminal Analog Haze
+                float scanline = sin(uv.y * u_resolution.y * 1.2) * 0.006;
                 vec3 finalCol = clamp(vec3(r, g, b) - scanline, 0.0, 1.0);
 
                 // OPAQUE ALPHA FIX: Always set alpha = 1.0 so output is never black/transparent
@@ -2769,78 +3062,85 @@ document.addEventListener('DOMContentLoaded', () => {
             const flawedMirrorVal = getSliderValue(flawedMirroringSlider, 80);
             const chromaticPx = getSliderValue(chromaticAberrationSlider, 28);
 
-            // 2. Scan high contrast regions for feature detection (eyes, mouths, faces, logos, text)
-            scanForTextCandidates(w, h);
+            // 2. Detect Human Subjects & Facial Landmarks
+            const detectedPersons = detectPersonFaces(w, h);
 
-            // 3. FEATURE DUPLICATION & ANGLED OFFSET (Organic Biological Blending)
-            // Pick salient feature blocks (eyes, mouths, facial features, text logos)
-            // and draw duplicated copies shifted DOWNWARD and at an ANGLE, with RADIAL FEATHERING
-            // so features blend seamlessly into surrounding skin/biology without hard box edges!
-            if (textCandidateBlocks.length > 0) {
-                const numDuplications = 3 + Math.floor(Math.random() * 4); // 3 to 6 feature duplications
-                console.log(`[DEBUG ORGANIC DUP] Duplicating ${numDuplications} feature blocks with radial edge feathering...`);
+            if (detectedPersons.length > 0) {
+                console.log(`%c[IMAGE ENGINE] Detected ${detectedPersons.length} human subject(s) — applying Uncanny Facial Misremembering (Kane Morph)`, 'color: #38ef7d; font-weight: bold;');
+                addLog(`[PERSON DETECTED] Uncanny facial anatomical reconstruction active on ${detectedPersons.length} subject(s)`, 'alert');
 
-                for (let d = 0; d < numDuplications; d++) {
-                    const block = textCandidateBlocks[Math.floor(Math.random() * textCandidateBlocks.length)];
-                    if (!block) continue;
+                // Apply Uncanny Facial Morph to each detected human face
+                for (const face of detectedPersons) {
+                    applyUncannyFaceMorph(face, w, h, masterVal, performance.now());
+                }
 
-                    // Expand feature bounding box to capture whole eyes/mouths/text
-                    const featureW = Math.min(w - block.x, Math.max(32, block.w * 3.5));
-                    const featureH = Math.min(h - block.y, Math.max(28, block.h * 3.0));
-                    const fx = Math.max(0, block.x - Math.floor(block.w * 0.6));
-                    const fy = Math.max(0, block.y - Math.floor(block.h * 0.6));
+                // If text glitching is enabled, protect human face from poster cuts and only process background text
+                if (toggleMisrememberedText && toggleMisrememberedText.checked) {
+                    scanForTextCandidates(w, h);
+                    textCandidateBlocks = textCandidateBlocks.filter(b => {
+                        return !detectedPersons.some(f => 
+                            b.x < f.x + f.w && b.x + b.w > f.x &&
+                            b.y < f.y + f.h && b.y + b.h > f.y
+                        );
+                    });
+                    if (textCandidateBlocks.length > 0) {
+                        applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
+                    }
+                }
+            } else {
+                console.log('[IMAGE ENGINE] Non-human / Environment subject — applying Entity Memory Model');
+                // Entity Memory Model: scan image for salient features (furniture, fixtures, doors, wallpaper)
+                initializeMemoryEntities(w, h);
+                scanForTextCandidates(w, h);
 
-                    // Angled & downward displacement offset (e.g. eye copied downward at an angle)
-                    const dx = fx + (15 + Math.random() * 45); // shifted right
-                    const dy = fy + (20 + Math.random() * 60); // shifted downward
-                    const angle = (Math.random() - 0.5) * 0.45; // angled tilt
+                if (textCandidateBlocks.length > 0) {
+                    const numDuplications = 2 + Math.floor(Math.random() * 3);
+                    for (let d = 0; d < numDuplications; d++) {
+                        const block = textCandidateBlocks[Math.floor(Math.random() * textCandidateBlocks.length)];
+                        if (!block) continue;
 
-                    // Create offscreen canvas for radial edge feathering
-                    const offCanvas = document.createElement('canvas');
-                    offCanvas.width = featureW;
-                    offCanvas.height = featureH;
-                    const offCtx = offCanvas.getContext('2d');
+                        const featureW = Math.min(w - block.x, Math.max(32, block.w * 2.5));
+                        const featureH = Math.min(h - block.y, Math.max(28, block.h * 2.5));
+                        const fx = Math.max(0, block.x - Math.floor(block.w * 0.4));
+                        const fy = Math.max(0, block.y - Math.floor(block.h * 0.4));
+                        const dx = fx + (12 + Math.random() * 35);
+                        const dy = fy + (15 + Math.random() * 40);
+                        const angle = (Math.random() - 0.5) * 0.25;
 
-                    // Draw extracted feature onto offscreen canvas
-                    offCtx.drawImage(glitchCanvas, fx, fy, featureW, featureH, 0, 0, featureW, featureH);
+                        const offCanvas = document.createElement('canvas');
+                        offCanvas.width = featureW;
+                        offCanvas.height = featureH;
+                        const offCtx = offCanvas.getContext('2d');
+                        offCtx.drawImage(glitchCanvas, fx, fy, featureW, featureH, 0, 0, featureW, featureH);
 
-                    // Apply radial gradient alpha mask (destination-in) for seamless organic edge blending
-                    offCtx.globalCompositeOperation = 'destination-in';
-                    const grad = offCtx.createRadialGradient(
-                        featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.15,
-                        featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.5
-                    );
-                    grad.addColorStop(0, 'rgba(0,0,0,1)');
-                    grad.addColorStop(0.7, 'rgba(0,0,0,0.85)');
-                    grad.addColorStop(1, 'rgba(0,0,0,0)');
-                    offCtx.fillStyle = grad;
-                    offCtx.fillRect(0, 0, featureW, featureH);
+                        offCtx.globalCompositeOperation = 'destination-in';
+                        const grad = offCtx.createRadialGradient(
+                            featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.15,
+                            featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.5
+                        );
+                        grad.addColorStop(0, 'rgba(0,0,0,1)');
+                        grad.addColorStop(0.7, 'rgba(0,0,0,0.85)');
+                        grad.addColorStop(1, 'rgba(0,0,0,0)');
+                        offCtx.fillStyle = grad;
+                        offCtx.fillRect(0, 0, featureW, featureH);
 
-                    console.log(`[DEBUG ORGANIC DUP #${d+1}] Feathered feature at (${fx}, ${fy}) -> (${dx.toFixed(0)}, ${dy.toFixed(0)}) angle: ${angle.toFixed(2)}rad`);
+                        ctx.save();
+                        ctx.translate(dx + featureW / 2, dy + featureH / 2);
+                        ctx.rotate(angle);
+                        ctx.globalAlpha = 0.85;
+                        ctx.drawImage(offCanvas, -featureW / 2, -featureH / 2);
+                        ctx.restore();
+                    }
+                }
 
-                    ctx.save();
-                    ctx.translate(dx + featureW / 2, dy + featureH / 2);
-                    ctx.rotate(angle);
-                    ctx.globalAlpha = 0.88 + Math.random() * 0.12;
-                    ctx.drawImage(offCanvas, -featureW / 2, -featureH / 2);
-                    ctx.restore();
+                if (toggleMisrememberedText && toggleMisrememberedText.checked) {
+                    applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
                 }
             }
 
-            // 4. Misremembered Text & Symbol Garble (always mangles text)
-            if (toggleMisrememberedText && toggleMisrememberedText.checked) {
-                console.log('[DEBUG IMAGE] Applying misremembered text garble...');
-                applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
-                applyPosterBandMelt(w, h, performance.now());
-            }
-
-            // NO random mirroring or color degradation bursts on static images
-            // (saved strictly for videos per user rule)
-
-            // 5. Crisp Chromatic Aberration Shift
+            // 5. Crisp Subtle Chromatic Aberration Shift (Natural Analog Film, No Rainbow)
             if (chromaticPx > 0) {
-                console.log('[DEBUG IMAGE] Applying chromatic aberration split...');
-                applyChromaticAberration(w, h, chromaticPx * 0.4);
+                applyChromaticAberration(w, h, chromaticPx * 0.35);
             }
 
             // 7. Enable Snapshot and Preview Downloads
@@ -3060,67 +3360,16 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) {}
     }
 
-
-    let lastColorBurstTime = 0;
-    let colorBurstActive = false;
-    let colorBurstType = 0;
-    let colorBurstExpiry = 0;
-
-    function applyRandomColorBurst(w, h, intensity, masterVal, now) {
-        // Color burst: reduced from 3% to 1% per frame — was triggering rainbow on every image
-        if (!colorBurstActive && (now - lastColorBurstTime > 2000) && frameRng() < 0.012 * masterVal) {
-            colorBurstActive = true;
-            colorBurstType = Math.floor(Math.random() * 4);
-            colorBurstExpiry = now + 120 + Math.random() * 350;
-            lastColorBurstTime = now;
-        }
-        if (colorBurstActive && now > colorBurstExpiry) colorBurstActive = false;
-
+    // AUTHENTIC ANALOG TAPE WARMTH (Subtle VHS Luma/Chroma drift - NO RAINBOW / NEON GLITCH)
+    function applyAnalogTapeWarmth(w, h, masterVal) {
         try {
             const imgData = ctx.getImageData(0, 0, w, h);
             const data = imgData.data;
-            const copy = new Uint8ClampedArray(data);
-            const shift = Math.floor(2 + masterVal * intensity * 0.6) * 4;
+            const shift = Math.floor(1 + masterVal * 2) * 4;
 
+            // Very subtle Y/C tape delay (slight red-blue micro offset)
             for (let i = 0; i < data.length; i += 4) {
-                if (i + shift < data.length) data[i]     = copy[i + shift];
-                if (i - shift >= 0)          data[i + 2] = copy[i - shift + 2];
-            }
-
-            if (colorBurstActive) {
-                switch (colorBurstType) {
-                    case 0:
-                        for (let i = 0; i < data.length; i += 4) { const t = data[i]; data[i] = data[i+1]; data[i+1] = t; }
-                        break;
-                    case 1:
-                        for (let i = 0; i < data.length; i += 4) {
-                            if (data[i] > 120) data[i] = 255 - data[i];
-                        }
-                        break;
-                    case 2:
-                        for (let i = 0; i < data.length; i += 4) {
-                            const g = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
-                            data[i]   = Math.min(255, g * 0.35 + data[i] * 0.75);
-                            data[i+1] = g * 0.45;
-                        }
-                        break;
-                    case 3:
-                        const bsz = 16;
-                        for (let by = 0; by < h; by += bsz) {
-                            for (let bx = 0; bx < w; bx += bsz) {
-                                if (Math.random() < 0.3) {
-                                    for (let py = by; py < Math.min(by+bsz,h); py++) {
-                                        for (let px = bx; px < Math.min(bx+bsz,w); px++) {
-                                            const idx = (py*w+px)*4;
-                                            const r=data[idx],g=data[idx+1],b=data[idx+2];
-                                            data[idx]=g;data[idx+1]=b;data[idx+2]=r;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                }
+                if (i + shift < data.length) data[i] = Math.round(data[i] * 0.96 + data[i + shift] * 0.04);
             }
             ctx.putImageData(imgData, 0, 0);
         } catch (e) {}
@@ -3387,6 +3636,8 @@ document.addEventListener('DOMContentLoaded', () => {
         insertedEntities = [];
         globalDecayLevel = 0;
         _lastEntityDecayTime = 0;
+        trackedFaces = [];
+        lastFaceScanTime = 0;
 
         // Clear canvas
         ctx.clearRect(0, 0, glitchCanvas.width, glitchCanvas.height);

@@ -59,7 +59,7 @@ body {
     background-blend-mode: multiply;
 }
 
-/* CRT scanline overlay */
+/* CRT scanline overlay - subtle analog texture */
 .crt-overlay {
     position: fixed;
     top: 0; left: 0;
@@ -67,13 +67,13 @@ body {
     background: repeating-linear-gradient(
         to bottom,
         rgba(0, 0, 0, 0) 0px,
-        rgba(0, 0, 0, 0) 1px,
-        rgba(0, 0, 0, 0.22) 2px,
-        rgba(0, 0, 0, 0.22) 3px
+        rgba(0, 0, 0, 0) 2px,
+        rgba(0, 0, 0, 0.04) 3px,
+        rgba(0, 0, 0, 0.04) 4px
     );
     pointer-events: none;
     z-index: 999;
-    opacity: 1;
+    opacity: 0.35;
 }
 
 .vignette-overlay {
