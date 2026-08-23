@@ -1489,112 +1489,120 @@ document.addEventListener('DOMContentLoaded', () => {
     // Seamlessly pulls/smudges the nose, nostril cavity, and upper lip horizontally
     // across the cheek with continuous bilinear skin interpolation (Kane Pixels effect)
     // =========================================================================
+    // =========================================================================
+    // UNCANNY FACIAL MISREMEMBERING — CASCADE NOSE STAMP + EYE SHIFT
+    // Exactly replicates the reference image:
+    //   - The nose is duplicated 3-4 times cascading diagonally downward, each
+    //     copy slightly overlapping the previous, with soft radial feathering
+    //   - One eye is subtly lifted upward and blended back in
+    //   - Everything else stays completely untouched / photographic
+    // =========================================================================
     function applyUncannyFaceMorph(face, w, h, intensity, now) {
         if (!face) return;
         try {
-            const fx = face.x;
-            const fy = face.y;
             const fw = face.w;
             const fh = face.h;
-
             const nose = face.nose;
-            const mouth = face.mouth;
 
-            // Bounding box for the face area to warp
-            const padX = Math.round(fw * 0.15);
-            const padY = Math.round(fh * 0.15);
-            const boxX = Math.max(0, fx - padX);
-            const boxY = Math.max(0, fy - padY);
-            const boxW = Math.min(w - boxX, fw + padX * 2);
-            const boxH = Math.min(h - boxY, fh + padY * 2);
+            // ── PASS 1: Cascading Nose Duplication ──────────────────────────
+            // Extract a region around the nose (wider than the nose landmark alone)
+            const noseRegX = Math.max(0, nose.x - Math.round(nose.w * 0.25));
+            const noseRegY = Math.max(0, nose.y - Math.round(nose.h * 0.15));
+            const noseRegW = Math.min(w - noseRegX, Math.round(nose.w * 1.5));
+            const noseRegH = Math.min(h - noseRegY, Math.round(nose.h * 1.4));
 
-            if (boxW < 20 || boxH < 20) return;
+            if (noseRegW > 10 && noseRegH > 10) {
+                // Build an offscreen canvas with the nose pixel data + soft radial edge mask
+                const noseCanvas = document.createElement('canvas');
+                noseCanvas.width  = noseRegW;
+                noseCanvas.height = noseRegH;
+                const nCtx = noseCanvas.getContext('2d');
 
-            const imgData = ctx.getImageData(boxX, boxY, boxW, boxH);
-            const srcData = new Uint8ClampedArray(imgData.data);
-            const dstData = imgData.data;
+                // Draw the exact nose pixels onto the offscreen canvas
+                nCtx.drawImage(glitchCanvas, noseRegX, noseRegY, noseRegW, noseRegH, 0, 0, noseRegW, noseRegH);
 
-            // Determine drag direction towards the larger/visible cheek (right cheek by default in Kane reference)
-            const preferRight = (face.rightCheek.w >= face.leftCheek.w);
-            const dirSign = preferRight ? 1 : -1;
+                // Soft radial gradient mask so copies blend seamlessly (no hard box edges)
+                nCtx.globalCompositeOperation = 'destination-in';
+                const grad = nCtx.createRadialGradient(
+                    noseRegW * 0.5, noseRegH * 0.5, Math.min(noseRegW, noseRegH) * 0.08,
+                    noseRegW * 0.5, noseRegH * 0.5, Math.min(noseRegW, noseRegH) * 0.58
+                );
+                grad.addColorStop(0,   'rgba(0,0,0,1)');
+                grad.addColorStop(0.5, 'rgba(0,0,0,0.92)');
+                grad.addColorStop(1,   'rgba(0,0,0,0)');
+                nCtx.fillStyle = grad;
+                nCtx.fillRect(0, 0, noseRegW, noseRegH);
 
-            const strength = Math.max(0.7, Math.min(1.4, intensity || 0.9));
+                // Determine diagonal direction: angled slightly toward lower-cheek/jaw
+                // The angle in the reference is roughly 10-18° below horizontal
+                const stepX = Math.round(noseRegW * 0.18);   // rightward per step
+                const stepY = Math.round(noseRegH * 0.72);   // downward per step (dominant)
+                const angle  = -0.18; // subtle CCW tilt so copies look naturally diagonal
 
-            // Define Photoshop-style Liquify Forward Warp Brush Strokes:
-            // 1. Primary Nose Tip & Nostril Smudge Stroke
-            // Pulls the nostril cavity and nose tip sideways across the cheek
-            const stroke1 = {
-                cx: (nose.x + nose.w * 0.60 - boxX),
-                cy: (nose.y + nose.h * 0.70 - boxY),
-                vx: fw * 0.32 * strength * dirSign,
-                vy: fh * 0.04 * strength,
-                radius: fw * 0.40
-            };
+                const numCopies = 4; // 4 copies creates 3 overlapping steps below the original
 
-            // 2. Upper Lip & Mouth Line Smudge Stroke
-            // Pulls the right upper lip corner sideways to create the stretched flat mouth
-            const stroke2 = {
-                cx: (mouth.x + mouth.w * 0.65 - boxX),
-                cy: (mouth.y + mouth.h * 0.35 - boxY),
-                vx: fw * 0.26 * strength * dirSign,
-                vy: fh * 0.02 * strength,
-                radius: fw * 0.34
-            };
+                for (let i = 1; i <= numCopies; i++) {
+                    const destX = noseRegX + stepX * i;
+                    const destY = noseRegY + stepY * i;
+                    // First copy is most opaque, fades out toward the bottom
+                    const alpha = Math.max(0.10, 0.82 - i * 0.16);
 
-            // 3. Mid-Philtrum / Cheek Transition Smudge Stroke
-            // Connects the nose and mouth stretch smoothly along cheek anatomy
-            const stroke3 = {
-                cx: (nose.x + nose.w * 0.50 - boxX),
-                cy: (nose.y + nose.h * 0.90 - boxY),
-                vx: fw * 0.22 * strength * dirSign,
-                vy: 0,
-                radius: fw * 0.30
-            };
+                    // Clip stamp to canvas bounds
+                    if (destX + noseRegW < 0 || destX > w) continue;
+                    if (destY + noseRegH < 0 || destY > h) continue;
 
-            const strokes = [stroke1, stroke2, stroke3];
-
-            // Execute 2D smooth liquify warp with bilinear sampling
-            for (let py = 0; py < boxH; py++) {
-                for (let px = 0; px < boxW; px++) {
-                    let totalDx = 0;
-                    let totalDy = 0;
-                    let totalWeight = 0;
-
-                    for (let s = 0; s < strokes.length; s++) {
-                        const str = strokes[s];
-                        const distSq = (px - str.cx) * (px - str.cx) + (py - str.cy) * (py - str.cy);
-                        const rSq = str.radius * str.radius;
-
-                        if (distSq < rSq) {
-                            const d = Math.sqrt(distSq) / str.radius;
-                            // Smooth cubic hermite / cosine falloff (Photoshop standard)
-                            const weight = 0.5 * (1.0 + Math.cos(d * Math.PI));
-                            totalDx += str.vx * weight;
-                            totalDy += str.vy * weight;
-                            totalWeight += weight;
-                        }
-                    }
-
-                    if (totalWeight > 0.001) {
-                        // Inverse warp mapping: sample source pixel at (px - totalDx, py - totalDy)
-                        const srcX = px - totalDx;
-                        const srcY = py - totalDy;
-
-                        if (srcX >= 0 && srcX < boxW && srcY >= 0 && srcY < boxH) {
-                            const sampled = sampleBilinear(srcData, boxW, boxH, srcX, srcY);
-                            const di = (py * boxW + px) * 4;
-                            dstData[di]     = sampled[0];
-                            dstData[di + 1] = sampled[1];
-                            dstData[di + 2] = sampled[2];
-                            dstData[di + 3] = sampled[3];
-                        }
-                    }
+                    ctx.save();
+                    ctx.globalAlpha = alpha;
+                    ctx.translate(destX + noseRegW * 0.5, destY + noseRegH * 0.5);
+                    ctx.rotate(angle * i * 0.4);  // small cumulative tilt per step
+                    ctx.drawImage(noseCanvas, -noseRegW * 0.5, -noseRegH * 0.5);
+                    ctx.restore();
                 }
             }
 
-            ctx.putImageData(imgData, boxX, boxY);
+            // ── PASS 2: Asymmetric Eye Lift ──────────────────────────────────
+            // Pick the eye that's closer to the camera / more visible (larger region)
+            const eyes = face.eyes;
+            const leftArea  = eyes.left.w  * eyes.left.h;
+            const rightArea = eyes.right.w * eyes.right.h;
+            const targetEye = leftArea >= rightArea ? eyes.left : eyes.right;
+
+            const ex = Math.max(0, targetEye.x - Math.round(targetEye.w * 0.2));
+            const ey = Math.max(0, targetEye.y - Math.round(targetEye.h * 0.2));
+            const ew = Math.min(w - ex, Math.round(targetEye.w * 1.4));
+            const eh = Math.min(h - ey, Math.round(targetEye.h * 1.4));
+
+            if (ew > 8 && eh > 8) {
+                const eyeCanvas = document.createElement('canvas');
+                eyeCanvas.width  = ew;
+                eyeCanvas.height = eh;
+                const eCtx = eyeCanvas.getContext('2d');
+
+                eCtx.drawImage(glitchCanvas, ex, ey, ew, eh, 0, 0, ew, eh);
+
+                // Soft radial edge blend
+                eCtx.globalCompositeOperation = 'destination-in';
+                const eGrad = eCtx.createRadialGradient(
+                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.08,
+                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.52
+                );
+                eGrad.addColorStop(0,   'rgba(0,0,0,1)');
+                eGrad.addColorStop(0.6, 'rgba(0,0,0,0.88)');
+                eGrad.addColorStop(1,   'rgba(0,0,0,0)');
+                eCtx.fillStyle = eGrad;
+                eCtx.fillRect(0, 0, ew, eh);
+
+                // Lift upward — this creates the "wrong eye height" uncanny look
+                const liftY = Math.round(eh * 0.28);  // lift ~28% of eye height
+
+                ctx.save();
+                ctx.globalAlpha = 0.90;
+                ctx.drawImage(eyeCanvas, ex, ey - liftY);
+                ctx.restore();
+            }
+
         } catch (e) {
-            console.warn('[LIQUIFY WARP ERR]', e);
+            console.warn('[FACE MORPH ERR]', e);
         }
     }
 
@@ -3141,10 +3149,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            // 5. Crisp Subtle Chromatic Aberration Shift (Natural Analog Film, No Rainbow)
-            if (chromaticPx > 0) {
-                applyChromaticAberration(w, h, chromaticPx * 0.35);
-            }
+            // (No chromatic aberration on portraits — it causes rainbow color banding)
 
             // 7. Enable Snapshot and Preview Downloads
             btnSnapshotImage.disabled = false;
