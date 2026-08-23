@@ -1453,8 +1453,41 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
-    // UNCANNY FACIAL MISREMEMBERING MORPH (Kane Pixels Organic Smear Effect)
-    // Slices and elongates nose & mouth horizontally into the cheek with seamless skin blending
+    // BILINEAR SAMPLER FOR PHOTOSHOP-GRADE SMOOTH LIQUIFY WARP
+    // =========================================================================
+    function sampleBilinear(data, w, h, x, y) {
+        const x0 = Math.floor(x);
+        const y0 = Math.floor(y);
+        const x1 = Math.min(w - 1, x0 + 1);
+        const y1 = Math.min(h - 1, y0 + 1);
+        const fx = x - x0;
+        const fy = y - y0;
+
+        const cx0 = Math.max(0, Math.min(w - 1, x0));
+        const cy0 = Math.max(0, Math.min(h - 1, y0));
+
+        const i00 = (cy0 * w + cx0) * 4;
+        const i10 = (cy0 * w + x1) * 4;
+        const i01 = (y1 * w + cx0) * 4;
+        const i11 = (y1 * w + x1) * 4;
+
+        const w00 = (1 - fx) * (1 - fy);
+        const w10 = fx * (1 - fy);
+        const w01 = (1 - fx) * fy;
+        const w11 = fx * fy;
+
+        return [
+            data[i00] * w00 + data[i10] * w10 + data[i01] * w01 + data[i11] * w11,
+            data[i00 + 1] * w00 + data[i10 + 1] * w10 + data[i01 + 1] * w01 + data[i11 + 1] * w11,
+            data[i00 + 2] * w00 + data[i10 + 2] * w10 + data[i01 + 2] * w01 + data[i11 + 2] * w11,
+            data[i00 + 3] * w00 + data[i10 + 3] * w10 + data[i01 + 3] * w01 + data[i11 + 3] * w11
+        ];
+    }
+
+    // =========================================================================
+    // UNCANNY FACIAL MISREMEMBERING MORPH (Photoshop Liquify Forward Smudge)
+    // Seamlessly pulls/smudges the nose, nostril cavity, and upper lip horizontally
+    // across the cheek with continuous bilinear skin interpolation (Kane Pixels effect)
     // =========================================================================
     function applyUncannyFaceMorph(face, w, h, intensity, now) {
         if (!face) return;
@@ -1467,114 +1500,101 @@ document.addEventListener('DOMContentLoaded', () => {
             const nose = face.nose;
             const mouth = face.mouth;
 
-            // Bounding zone covering nose bridge down through mouth
-            const zoneX = Math.max(0, Math.min(w - 20, nose.x - Math.floor(nose.w * 0.15)));
-            const zoneY = Math.max(0, Math.min(h - 20, nose.y));
-            const zoneW = Math.min(w - zoneX, Math.max(20, Math.floor(nose.w * 1.3)));
-            const zoneH = Math.min(h - zoneY, Math.max(20, Math.floor((mouth.y + mouth.h) - nose.y)));
+            // Bounding box for the face area to warp
+            const padX = Math.round(fw * 0.15);
+            const padY = Math.round(fh * 0.15);
+            const boxX = Math.max(0, fx - padX);
+            const boxY = Math.max(0, fy - padY);
+            const boxW = Math.min(w - boxX, fw + padX * 2);
+            const boxH = Math.min(h - boxY, fh + padY * 2);
 
-            if (zoneW > 10 && zoneH > 10) {
-                // Determine drift direction towards the cheek
-                const preferRight = (face.rightCheek.w >= face.leftCheek.w);
-                const dirSign = preferRight ? 1 : -1;
-                const shiftDist = Math.round(fw * (0.22 + Math.min(0.28, (intensity || 0.8) * 0.20)) * dirSign);
+            if (boxW < 20 || boxH < 20) return;
 
-                // --- PASS A: Pixel-level smooth horizontal elongation into the cheek ---
-                const cheekZoneX = dirSign > 0 
-                    ? Math.max(0, Math.min(w - 10, zoneX)) 
-                    : Math.max(0, Math.min(w - 10, zoneX + shiftDist));
-                const cheekZoneW = Math.min(w - cheekZoneX, Math.max(30, zoneW + Math.abs(shiftDist) + 20));
-                const cheekZoneY = zoneY;
-                const cheekZoneH = zoneH;
+            const imgData = ctx.getImageData(boxX, boxY, boxW, boxH);
+            const srcData = new Uint8ClampedArray(imgData.data);
+            const dstData = imgData.data;
 
-                if (cheekZoneW > 15 && cheekZoneH > 15 && cheekZoneX + cheekZoneW <= w && cheekZoneY + cheekZoneH <= h) {
-                    const imgData = ctx.getImageData(cheekZoneX, cheekZoneY, cheekZoneW, cheekZoneH);
-                    const src = new Uint8ClampedArray(imgData.data);
-                    const dst = imgData.data;
+            // Determine drag direction towards the larger/visible cheek (right cheek by default in Kane reference)
+            const preferRight = (face.rightCheek.w >= face.leftCheek.w);
+            const dirSign = preferRight ? 1 : -1;
 
-                    for (let cy = 0; cy < cheekZoneH; cy++) {
-                        // Smooth bell curve envelope centered on the nostrils / upper lip
-                        const relY = cy / cheekZoneH;
-                        const envelope = Math.sin(relY * Math.PI); // peak in the middle (nostrils/mouth)
-                        const rowShift = Math.round(shiftDist * envelope);
+            const strength = Math.max(0.7, Math.min(1.4, intensity || 0.9));
 
-                        for (let cx = 0; cx < cheekZoneW; cx++) {
-                            const di = (cy * cheekZoneW + cx) * 4;
-                            let srcX = cx - rowShift;
-                            if (srcX >= 0 && srcX < cheekZoneW) {
-                                const si = (cy * cheekZoneW + srcX) * 4;
-                                const blend = 0.72 + 0.28 * envelope;
-                                dst[di]     = Math.round(src[si]     * blend + src[di]     * (1 - blend));
-                                dst[di + 1] = Math.round(src[si + 1] * blend + src[di + 1] * (1 - blend));
-                                dst[di + 2] = Math.round(src[si + 2] * blend + src[di + 2] * (1 - blend));
-                            }
+            // Define Photoshop-style Liquify Forward Warp Brush Strokes:
+            // 1. Primary Nose Tip & Nostril Smudge Stroke
+            // Pulls the nostril cavity and nose tip sideways across the cheek
+            const stroke1 = {
+                cx: (nose.x + nose.w * 0.60 - boxX),
+                cy: (nose.y + nose.h * 0.70 - boxY),
+                vx: fw * 0.32 * strength * dirSign,
+                vy: fh * 0.04 * strength,
+                radius: fw * 0.40
+            };
+
+            // 2. Upper Lip & Mouth Line Smudge Stroke
+            // Pulls the right upper lip corner sideways to create the stretched flat mouth
+            const stroke2 = {
+                cx: (mouth.x + mouth.w * 0.65 - boxX),
+                cy: (mouth.y + mouth.h * 0.35 - boxY),
+                vx: fw * 0.26 * strength * dirSign,
+                vy: fh * 0.02 * strength,
+                radius: fw * 0.34
+            };
+
+            // 3. Mid-Philtrum / Cheek Transition Smudge Stroke
+            // Connects the nose and mouth stretch smoothly along cheek anatomy
+            const stroke3 = {
+                cx: (nose.x + nose.w * 0.50 - boxX),
+                cy: (nose.y + nose.h * 0.90 - boxY),
+                vx: fw * 0.22 * strength * dirSign,
+                vy: 0,
+                radius: fw * 0.30
+            };
+
+            const strokes = [stroke1, stroke2, stroke3];
+
+            // Execute 2D smooth liquify warp with bilinear sampling
+            for (let py = 0; py < boxH; py++) {
+                for (let px = 0; px < boxW; px++) {
+                    let totalDx = 0;
+                    let totalDy = 0;
+                    let totalWeight = 0;
+
+                    for (let s = 0; s < strokes.length; s++) {
+                        const str = strokes[s];
+                        const distSq = (px - str.cx) * (px - str.cx) + (py - str.cy) * (py - str.cy);
+                        const rSq = str.radius * str.radius;
+
+                        if (distSq < rSq) {
+                            const d = Math.sqrt(distSq) / str.radius;
+                            // Smooth cubic hermite / cosine falloff (Photoshop standard)
+                            const weight = 0.5 * (1.0 + Math.cos(d * Math.PI));
+                            totalDx += str.vx * weight;
+                            totalDy += str.vy * weight;
+                            totalWeight += weight;
                         }
                     }
-                    ctx.putImageData(imgData, cheekZoneX, cheekZoneY);
+
+                    if (totalWeight > 0.001) {
+                        // Inverse warp mapping: sample source pixel at (px - totalDx, py - totalDy)
+                        const srcX = px - totalDx;
+                        const srcY = py - totalDy;
+
+                        if (srcX >= 0 && srcX < boxW && srcY >= 0 && srcY < boxH) {
+                            const sampled = sampleBilinear(srcData, boxW, boxH, srcX, srcY);
+                            const di = (py * boxW + px) * 4;
+                            dstData[di]     = sampled[0];
+                            dstData[di + 1] = sampled[1];
+                            dstData[di + 2] = sampled[2];
+                            dstData[di + 3] = sampled[3];
+                        }
+                    }
                 }
-
-                // --- PASS B: Soft-feathered ghost nostril & mouth contour stamp ---
-                const offNose = document.createElement('canvas');
-                offNose.width = zoneW;
-                offNose.height = zoneH;
-                const offCtx = offNose.getContext('2d');
-                offCtx.drawImage(glitchCanvas, zoneX, zoneY, zoneW, zoneH, 0, 0, zoneW, zoneH);
-
-                // Feather edges with smooth radial gradient (destination-in)
-                offCtx.globalCompositeOperation = 'destination-in';
-                const grad = offCtx.createRadialGradient(
-                    zoneW * 0.5, zoneH * 0.5, Math.min(zoneW, zoneH) * 0.15,
-                    zoneW * 0.5, zoneH * 0.5, Math.min(zoneW, zoneH) * 0.52
-                );
-                grad.addColorStop(0, 'rgba(0,0,0,1)');
-                grad.addColorStop(0.65, 'rgba(0,0,0,0.85)');
-                grad.addColorStop(1, 'rgba(0,0,0,0)');
-                offCtx.fillStyle = grad;
-                offCtx.fillRect(0, 0, zoneW, zoneH);
-
-                // Stamp ghost nostril / mouth across the cheek seamlessly
-                ctx.save();
-                ctx.globalAlpha = 0.78;
-                ctx.drawImage(offNose, zoneX + Math.round(shiftDist * 0.85), zoneY + Math.round((Math.random() - 0.5) * 4));
-                ctx.restore();
             }
 
-            // 2. UNCANNY ASYMMETRICAL EYE DRIFT
-            // Subtly offsets one eye with soft radial feathering, creating a wrong gaze
-            const targetEye = (Math.random() < 0.5) ? face.eyes.right : face.eyes.left;
-            const ex = Math.max(0, Math.min(w - 10, targetEye.x));
-            const ey = Math.max(0, Math.min(h - 10, targetEye.y));
-            const ew = Math.min(w - ex, Math.max(10, targetEye.w));
-            const eh = Math.min(h - ey, Math.max(10, targetEye.h));
-
-            if (ew > 10 && eh > 10) {
-                const offEye = document.createElement('canvas');
-                offEye.width = ew;
-                offEye.height = eh;
-                const eCtx = offEye.getContext('2d');
-                eCtx.drawImage(glitchCanvas, ex, ey, ew, eh, 0, 0, ew, eh);
-
-                eCtx.globalCompositeOperation = 'destination-in';
-                const eGrad = eCtx.createRadialGradient(
-                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.10,
-                    ew * 0.5, eh * 0.5, Math.min(ew, eh) * 0.48
-                );
-                eGrad.addColorStop(0, 'rgba(0,0,0,1)');
-                eGrad.addColorStop(0.70, 'rgba(0,0,0,0.80)');
-                eGrad.addColorStop(1, 'rgba(0,0,0,0)');
-                eCtx.fillStyle = eGrad;
-                eCtx.fillRect(0, 0, ew, eh);
-
-                const eyeShiftX = (Math.random() - 0.4) * 8;
-                const eyeShiftY = (Math.random() - 0.5) * 6;
-
-                ctx.save();
-                ctx.globalAlpha = 0.82;
-                ctx.drawImage(offEye, ex + eyeShiftX, ey + eyeShiftY);
-                ctx.restore();
-            }
+            ctx.putImageData(imgData, boxX, boxY);
         } catch (e) {
-            console.warn('[FACE MORPH ERR]', e);
+            console.warn('[LIQUIFY WARP ERR]', e);
         }
     }
 
@@ -3055,9 +3075,6 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.clearRect(0, 0, w, h);
             ctx.drawImage(img, 0, 0, w, h);
 
-            // Entity Memory Model: scan image for salient features
-            initializeMemoryEntities(w, h);
-
             const masterVal = getSliderValue(masterIntensitySlider, 85) / 100;
             const flawedMirrorVal = getSliderValue(flawedMirroringSlider, 80);
             const chromaticPx = getSliderValue(chromaticAberrationSlider, 28);
@@ -3066,26 +3083,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const detectedPersons = detectPersonFaces(w, h);
 
             if (detectedPersons.length > 0) {
-                console.log(`%c[IMAGE ENGINE] Detected ${detectedPersons.length} human subject(s) — applying Uncanny Facial Misremembering (Kane Morph)`, 'color: #38ef7d; font-weight: bold;');
+                console.log(`%c[IMAGE ENGINE] Detected ${detectedPersons.length} human subject(s) — applying Photoshop-grade Liquify Facial Smear`, 'color: #38ef7d; font-weight: bold;');
                 addLog(`[PERSON DETECTED] Uncanny facial anatomical reconstruction active on ${detectedPersons.length} subject(s)`, 'alert');
 
-                // Apply Uncanny Facial Morph to each detected human face
+                // Apply Photoshop-grade Liquify Facial Morph to each detected human face
                 for (const face of detectedPersons) {
                     applyUncannyFaceMorph(face, w, h, masterVal, performance.now());
-                }
-
-                // If text glitching is enabled, protect human face from poster cuts and only process background text
-                if (toggleMisrememberedText && toggleMisrememberedText.checked) {
-                    scanForTextCandidates(w, h);
-                    textCandidateBlocks = textCandidateBlocks.filter(b => {
-                        return !detectedPersons.some(f => 
-                            b.x < f.x + f.w && b.x + b.w > f.x &&
-                            b.y < f.y + f.h && b.y + b.h > f.y
-                        );
-                    });
-                    if (textCandidateBlocks.length > 0) {
-                        applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
-                    }
                 }
             } else {
                 console.log('[IMAGE ENGINE] Non-human / Environment subject — applying Entity Memory Model');
