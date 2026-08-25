@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.5.2';
+const APP_VERSION = 'v2.5.3';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1164,8 +1164,8 @@ document.addEventListener('DOMContentLoaded', () => {
             lastCaptureVideoTime = -1;
             triggerEntityDecayCycle();
             _lastEntityDecayTime = nowMs;
-        } else if (nowMs - _lastEntityDecayTime > ENTITY_DECAY_INTERVAL_MS && memoryEntities.length > 0) {
-            // Periodic in-playback decay: mutate 1-2 entities roughly every 12s
+        } else if (nowMs - _lastEntityDecayTime > ENTITY_DECAY_INTERVAL_MS && detectedWordEntities.length > 0) {
+            // Periodic in-playback decay: mutate 1-2 words roughly every 12s
             triggerEntityDecayCycle();
             _lastEntityDecayTime = nowMs;
         }
