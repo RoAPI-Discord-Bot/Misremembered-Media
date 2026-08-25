@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v3.5.0-FORGETS-PRO"
+APP_VERSION = "v3.6.0-FORGETS-ULTRA"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -288,12 +288,91 @@ class KanePixelsAudioDSP:
         return audio
 
     @staticmethod
-    def process_full_audio(audio, sr=44100, seed=12345, sliders=None):
+    def synthesize_liminal_ambient(n_samples, sr=44100, gain=0.042):
+        """
+        Procedural Kane Pixels / Still Life liminal ambient drone.
+        Slow sine pads (55Hz drone, 110Hz octave, 165Hz fifth) with slight detuning,
+        a noise carpet band-passed to 400-1200Hz, and a slow LFO undulation.
+        Sounds like: vast empty building, far-off HVAC, endless corridor.
+        """
+        t = np.linspace(0, n_samples / sr, n_samples, endpoint=False)
+
+        # Detuned slow drone pads — slightly out of phase for unsettling shimmer
+        pad = (
+            0.55 * np.sin(2 * np.pi * 55.00 * t) +
+            0.35 * np.sin(2 * np.pi * 55.13 * t) +
+            0.28 * np.sin(2 * np.pi * 110.0 * t) +
+            0.16 * np.sin(2 * np.pi * 110.19 * t) +
+            0.18 * np.sin(2 * np.pi * 165.0 * t) +
+            0.10 * np.sin(2 * np.pi * 220.5 * t) +
+            0.06 * np.sin(2 * np.pi * 440.0 * t)
+        )
+
+        # Very slow LFO undulation (0.07Hz & 0.13Hz)
+        lfo = (
+            0.60 + 0.22 * np.sin(2 * np.pi * 0.07 * t) +
+            0.12 * np.sin(2 * np.pi * 0.13 * t + 1.1) +
+            0.08 * np.sin(2 * np.pi * 0.31 * t + 2.4)
+        )
+
+        # Band-passed noise carpet — "room that isn't quite silent" feel
+        raw_noise = np.random.normal(0, 1, n_samples).astype(np.float32)
+        sos_bp = signal.butter(4, [400, 1200], btype='bandpass', fs=sr, output='sos')
+        noise_bp = signal.sosfilt(sos_bp, raw_noise) * 0.15
+
+        # Sub-bass breath: very slow 0.04Hz throb at 28Hz
+        sub_breath = 0.30 * np.sin(2 * np.pi * 28.0 * t) * (0.5 + 0.5 * np.sin(2 * np.pi * 0.04 * t))
+
+        mono = np.clip((pad * lfo + noise_bp + sub_breath) * gain, -1.0, 1.0)
+
+        # Slight stereo width via tiny time offset
+        shift = max(1, int(sr * 0.011))
+        left = mono
+        right = np.concatenate((np.zeros(shift), mono[:-shift]))
+        return np.column_stack((left, right)).astype(np.float32)
+
+    @staticmethod
+    def synthesize_no_signal_jingle(n_samples, sr=44100, gain=0.35):
+        """
+        Procedural 'Everything Must Go' style No Signal audio event.
+        Short broken-chord ascending pattern with retro telephone band EQ (300Hz-3400Hz).
+        """
+        note_freqs = [311.13, 392.00, 466.16, 523.25, 622.25, 783.99]
+        note_dur = max(1, int(sr * 0.10))
+        jingle = np.zeros(n_samples, dtype=np.float32)
+
+        for i in range(0, n_samples, note_dur):
+            note_idx = (i // note_dur) % len(note_freqs)
+            freq = note_freqs[note_idx]
+            end = min(n_samples, i + note_dur)
+            seg_len = end - i
+            seg_t = np.arange(seg_len) / sr
+            fade_in = min(int(seg_len * 0.06), seg_len)
+            fade_out = max(0, seg_len - int(seg_len * 0.76))
+            sustain = max(0, int(seg_len * 0.70))
+            env = np.concatenate([
+                np.linspace(0, 1, fade_in),
+                np.ones(sustain),
+                np.linspace(1, 0, fade_out)
+            ])[:seg_len]
+            jingle[i:end] += np.sin(2 * np.pi * freq * seg_t) * env * 0.7
+            jingle[i:end] += np.sin(2 * np.pi * freq * 2.0 * seg_t) * env * 0.20
+
+        # Telephone band EQ — retro broadcast deadness
+        sos_tel = signal.butter(4, [300, 3400], btype='bandpass', fs=sr, output='sos')
+        jingle = signal.sosfilt(sos_tel, jingle)
+        jingle = np.tanh(jingle * 2.2) * 0.45
+
+        mono = np.clip(jingle * gain, -1.0, 1.0)
+        return np.column_stack((mono, mono)).astype(np.float32)
+
+    @staticmethod
+    def process_full_audio(audio, sr=44100, seed=12345, sliders=None, fps=30.0, total_frames=0):
         if sliders is None:
             sliders = {}
         master_v = sliders.get("master_val", 85) / 100.0
         green_v  = sliders.get("green_shift", 60) / 100.0
-        
+
         # Ensure float32 stereo (-1.0 to 1.0)
         if audio.dtype == np.int16:
             audio_f = (audio.astype(np.float32) / 32768.0)
@@ -305,7 +384,8 @@ class KanePixelsAudioDSP:
         if audio_f.ndim == 1:
             audio_f = np.column_stack((audio_f, audio_f))
 
-        duration_s = len(audio_f) / float(sr)
+        n_samples = len(audio_f)
+        duration_s = n_samples / float(sr)
         dbg(f"Audio DSP: Processing {duration_s:.1f}s audio track with Kane Pixels parameters...", "AUDIO")
 
         # 1. Analog tape warping with weighted pitch intervals & stalls
@@ -318,20 +398,48 @@ class KanePixelsAudioDSP:
         with_echo = KanePixelsAudioDSP.apply_memory_whisper_echo(reverbed, sr=sr, delay_sec=2.6, gain=0.20 * master_v)
 
         # 4. Fluorescent light 60Hz electromagnetic hum
-        hum = KanePixelsAudioDSP.synthesize_fluorescent_hum(len(with_echo), sr=sr, gain=0.030 * master_v)
+        hum = KanePixelsAudioDSP.synthesize_fluorescent_hum(n_samples, sr=sr, gain=0.030 * master_v)
         mixed = with_echo + hum
 
-        # 5. Green Light Complex loud electrical hum surge
+        # 5. Kane Pixels / Still Life liminal ambient drone layer under entire track
+        dbg("Synthesizing liminal ambient drone layer...", "AUDIO")
+        ambient = KanePixelsAudioDSP.synthesize_liminal_ambient(n_samples, sr=sr, gain=0.040 * master_v)
+        mixed = mixed + ambient
+
+        # 6. Green Light electrical hum surge
         if green_v > 0.10:
             mixed = KanePixelsAudioDSP.apply_green_light_audio_surge(mixed, sr=sr, duration_s=duration_s, intensity=green_v * master_v)
 
-        # 6. Camcorder AGC & soft saturation limiter (prevent clipping)
+        # 7. Inject No Signal jingle at each no_signal window (every 18s cycle at 13.5s mark)
+        if master_v > 0.30:
+            dbg("Injecting No Signal jingle audio at interrupt timestamps...", "AUDIO")
+            jingle_dur = 0.80
+            jingle_n = int(sr * jingle_dur)
+            jingle_audio = KanePixelsAudioDSP.synthesize_no_signal_jingle(jingle_n, sr=sr, gain=0.38 * master_v)
+            cycle_time = 18.0
+            t_sec = 0.0
+            while t_sec < duration_s:
+                event_t = t_sec + 13.5
+                if event_t < duration_s:
+                    idx0 = int(event_t * sr)
+                    idx1 = min(n_samples, idx0 + jingle_n)
+                    seg_len = idx1 - idx0
+                    if seg_len > 0:
+                        fade_len = min(int(sr * 0.04), seg_len // 4)
+                        env = np.ones(seg_len, dtype=np.float32)
+                        env[:fade_len] = np.linspace(0, 1, fade_len)
+                        env[-fade_len:] = np.linspace(1, 0, fade_len)
+                        mixed[idx0:idx1] += jingle_audio[:seg_len] * env[:, np.newaxis]
+                t_sec += cycle_time
+
+        # 8. Camcorder AGC & soft saturation limiter
         saturated = np.tanh(mixed * 1.15) / 1.15
-        
+
         # Convert back to int16
         out_int16 = np.clip(saturated * 32767.0, -32767.0, 32767.0).astype(np.int16)
         dbg(f"Audio DSP: Processing complete.", "AUDIO")
         return out_int16
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -429,13 +537,13 @@ class LocalGlyphCorruptor:
                     strip_w = max(2, int(bh * 0.16))
                     for sx_pos in range(0, bw, strip_w * 2):
                         ex_pos = min(bw, sx_pos + strip_w)
-                        shift = rng.choice([-1, 1]) * rng.randint(2, max(3, int(bh * 0.22)))
+                        shift = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bh * 0.10)))
                         M = np.float32([[1, 0, 0], [0, 1, shift]])
                         patch[:, sx_pos:ex_pos] = cv2.warpAffine(patch[:, sx_pos:ex_pos], M, (ex_pos - sx_pos, bh), borderMode=cv2.BORDER_REFLECT)
                     out[y:y+bh, x:x+bw] = patch
 
                 # 2. Horizontal Bisect & Inversion Seam (Ref 4)
-                if intensity > 0.35 and rng.random() < 0.65:
+                if intensity > 0.35 and rng.random() < 0.45:
                     half_h = bh // 2
                     if half_h > 2:
                         flipped_lower = cv2.flip(patch[half_h:, :], -1)
@@ -446,15 +554,15 @@ class LocalGlyphCorruptor:
 
                 # 3. Angled Ghost Trailing & Offset Duplicate Layers (Ref 2)
                 if intensity > 0.25 and rng.random() < 0.80:
-                    shift_x = rng.choice([-1, 1]) * rng.randint(3, max(5, int(bw * 0.07)))
-                    shift_y = rng.choice([-1, 1]) * rng.randint(2, max(4, int(bh * 0.20)))
+                    shift_x = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bw * 0.03)))
+                    shift_y = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bh * 0.08)))
                     M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
                     ghost = cv2.warpAffine(patch, M, (bw, bh), borderMode=cv2.BORDER_REFLECT)
                     out[y:y+bh, x:x+bw] = cv2.addWeighted(out[y:y+bh, x:x+bw], 0.60, ghost, 0.40, 0)
 
                 # 4. Vertical Barcode Smear / Dripping Lines (Ref 5)
                 if intensity > 0.40 and rng.random() < 0.70:
-                    drip_len = rng.randint(int(bh * 1.5), int(bh * 3.5))
+                    drip_len = rng.randint(int(bh * 0.8), int(bh * 1.8))
                     bottom_row = patch[-2:, :, :]
                     drip_block = np.repeat(bottom_row[-1:, :, :], drip_len, axis=0)
                     y_end = min(h, y + bh + drip_len)
@@ -570,83 +678,102 @@ class MisrememberedEngine:
     def set_seed(self, seed_val):
         self.seed = seed_val
 
-    def generate_green_light_cracks(self, w, h, progress, rng, origin=None):
+    def generate_green_light_cracks(self, w, h, progress, rng):
         """
-        Authentic Kane Pixels Green Light: Inward perimeter caustic lightning & screen-edge surge.
-        Cracks crawl from outside borders/corners inward toward the center.
+        Kane Pixels Green Light — Full-screen cracked-glass Voronoi polygon mesh.
+        Based on reference images: the entire screen washes emerald-green with
+        bright yellow-white polygon seam cracks covering the WHOLE frame surface,
+        like a cracked windshield lit from behind.
+
+        Returns an additive overlay (BGR). The caller is responsible for applying
+        the green tint to the base frame before adding this overlay.
         """
+        crack_rng = random.Random(rng.randint(0, 0xFFFFFF))
+
+        # ── Voronoi seed points scattered across full frame ──
+        # Denser near edges, looser in center — cracks originate from border stress
+        n_seeds = int(18 + 22 * progress)  # 18 at start, up to 40 at full progress
+        seeds = []
+
+        # Force several seeds at/near each edge to anchor the mesh to the borders
+        for _ in range(6):
+            seeds.append((crack_rng.randint(0, w - 1), crack_rng.randint(0, max(1, int(h * 0.15)))))
+        for _ in range(6):
+            seeds.append((crack_rng.randint(0, w - 1), crack_rng.randint(max(0, int(h * 0.85)), h - 1)))
+        for _ in range(5):
+            seeds.append((crack_rng.randint(0, max(1, int(w * 0.15))), crack_rng.randint(0, h - 1)))
+        for _ in range(5):
+            seeds.append((crack_rng.randint(max(0, int(w * 0.85)), w - 1), crack_rng.randint(0, h - 1)))
+        # Interior seeds
+        for _ in range(n_seeds):
+            seeds.append((crack_rng.randint(0, w - 1), crack_rng.randint(0, h - 1)))
+
+        seeds = np.array(seeds, dtype=np.float32)
+        n_pts = len(seeds)
+
+        # Build a fast Voronoi using OpenCV Subdiv2D
+        rect = (0, 0, w, h)
+        subdiv = cv2.Subdiv2D(rect)
+        for pt in seeds:
+            px, py = float(np.clip(pt[0], 1, w - 2)), float(np.clip(pt[1], 1, h - 2))
+            try:
+                subdiv.insert((px, py))
+            except Exception:
+                pass
+
+        # Get Voronoi facets
+        try:
+            facet_list, _ = subdiv.getVoronoiFacetList([])
+        except Exception:
+            facet_list = []
+
+        # ── Draw the cracked glass seams ──
         overlay = np.zeros((h, w, 3), dtype=np.uint8)
-        
-        # Perimeter Origin Points along border perimeter (Outside In!)
-        perimeter_origins = [
-            (0, int(h * 0.15)),             # Left edge high
-            (0, int(h * 0.75)),             # Left edge low
-            (w - 1, int(h * 0.20)),         # Right edge high
-            (w - 1, int(h * 0.80)),         # Right edge low
-            (int(w * 0.25), 0),             # Top edge left
-            (int(w * 0.75), 0),             # Top edge right
-            (int(w * 0.30), h - 1),         # Bottom edge left
-            (int(w * 0.70), h - 1),         # Bottom edge right
-        ]
-        
-        center_x, center_y = w * 0.50, h * 0.50
-        branch_rng = random.Random(rng.randint(0, 0xFFFF))
-        
-        for ox, oy in perimeter_origins:
-            target_angle = math.atan2(center_y - oy, center_x - ox)
-            max_dist = np.sqrt(w**2 + h**2) * 0.65 * progress
-            
-            cur_x, cur_y = float(ox), float(oy)
-            step_len = max(5, int(w * 0.016))
-            points = [(int(cur_x), int(cur_y))]
-            dist_traveled = 0.0
-            
-            while dist_traveled < max_dist:
-                cur_angle = target_angle + branch_rng.uniform(-0.55, 0.55)
-                cur_x += np.cos(cur_angle) * step_len
-                cur_y += np.sin(cur_angle) * step_len
-                dist_traveled += step_len
-                
-                if 0 <= int(cur_x) < w and 0 <= int(cur_y) < h:
-                    points.append((int(cur_x), int(cur_y)))
-                else:
-                    break
-                    
-                # Electric fork branches
-                if branch_rng.random() < 0.28 and len(points) > 2:
-                    fork_angle = cur_angle + branch_rng.choice([-0.70, 0.70])
-                    fx, fy = cur_x, cur_y
-                    fork_pts = [(int(fx), int(fy))]
-                    for _ in range(branch_rng.randint(4, 9)):
-                        fx += np.cos(fork_angle + branch_rng.uniform(-0.30, 0.30)) * (step_len * 0.7)
-                        fy += np.sin(fork_angle + branch_rng.uniform(-0.30, 0.30)) * (step_len * 0.7)
-                        if 0 <= int(fx) < w and 0 <= int(fy) < h:
-                            fork_pts.append((int(fx), int(fy)))
-                    if len(fork_pts) > 1:
-                        cv2.polylines(overlay, [np.array(fork_pts)], False, (15, 180, 40), 2, cv2.LINE_AA)
-                        cv2.polylines(overlay, [np.array(fork_pts)], False, (180, 255, 200), 1, cv2.LINE_AA)
 
-            if len(points) > 1:
-                # 3-layer electric discharge glow
-                cv2.polylines(overlay, [np.array(points)], False, (10, 160, 30), 5, cv2.LINE_AA)
-                cv2.polylines(overlay, [np.array(points)], False, (40, 240, 80), 2, cv2.LINE_AA)
-                cv2.polylines(overlay, [np.array(points)], False, (230, 255, 235), 1, cv2.LINE_AA)
+        for facet in facet_list:
+            pts = np.array(facet, dtype=np.int32)
+            # Clip all points to frame bounds
+            pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
+            pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
 
-        # Luminous Caustic Edge & Corner Illumination Surge
-        glow_map = np.zeros((h, w, 3), dtype=np.float32)
-        Y, X = np.ogrid[:h, :w]
-        dist_top = Y
-        dist_bottom = h - Y
-        dist_left = X
-        dist_right = w - X
-        min_edge_dist = np.minimum(np.minimum(dist_top, dist_bottom), np.minimum(dist_left, dist_right))
-        edge_glow = np.clip(1.0 - (min_edge_dist / (max(w, h) * 0.35)), 0, 1) ** 1.8 * 0.85 * progress
-        
-        glow_map[:, :, 0] = edge_glow * 35   # Blue
-        glow_map[:, :, 1] = edge_glow * 240  # Intense Emerald Green
-        glow_map[:, :, 2] = edge_glow * 75   # Lime Green tint
+            # Only draw facets that are at least partially visible
+            if len(pts) < 3:
+                continue
 
-        return cv2.add(overlay, np.clip(glow_map, 0, 255).astype(np.uint8))
+            # Crack visibility: reveal progressively outward from edges as progress grows
+            # Facets near the border appear first; center facets appear later
+            facet_center_x = np.mean(pts[:, 0])
+            facet_center_y = np.mean(pts[:, 1])
+            dist_from_edge = min(
+                facet_center_x, w - facet_center_x,
+                facet_center_y, h - facet_center_y
+            ) / max(w, h)
+            reveal_threshold = dist_from_edge * 1.6  # edges reveal at progress~0, center at ~0.6
+            if progress < reveal_threshold:
+                continue
+
+            local_alpha = min(1.0, (progress - reveal_threshold) / max(0.001, 0.3))
+
+            # Glow halo seam (thick dark green under-glow)
+            cv2.polylines(overlay, [pts], True, (0, int(80 * local_alpha), 0), 5, cv2.LINE_AA)
+            # Mid seam — vivid emerald
+            cv2.polylines(overlay, [pts], True, (0, int(200 * local_alpha), int(40 * local_alpha)), 2, cv2.LINE_AA)
+            # Hot bright seam — near-white yellow-green caustic highlight
+            cv2.polylines(overlay, [pts], True,
+                          (int(120 * local_alpha), int(255 * local_alpha), int(160 * local_alpha)), 1, cv2.LINE_AA)
+
+            # Small flare hotspot at each vertex of the polygon
+            for vx, vy in pts:
+                if crack_rng.random() < 0.35 * local_alpha:
+                    flare_r = crack_rng.randint(2, 5)
+                    flare_col = (
+                        int(80 * local_alpha),
+                        int(255 * local_alpha),
+                        int(200 * local_alpha)
+                    )
+                    cv2.circle(overlay, (int(vx), int(vy)), flare_r, flare_col, -1, cv2.LINE_AA)
+
+        return overlay
 
     def render_no_signal_screen(self, width, height, lang):
         img = np.full((height, width, 3), (170, 10, 10), dtype=np.uint8) # Dark blue background
@@ -705,29 +832,38 @@ class MisrememberedEngine:
             elif 17.5 <= cycle_time < 18.0:
                 return self.render_no_video_screen(w, h)
 
-        # ── 2. THE GREEN LIGHT EVENT (Spatial Pause + Branching Electric Cracks) ──
+        # ── 2. THE GREEN LIGHT EVENT (Full-screen green wash + Voronoi cracked-glass mesh) ──
         if green_v > 0.10 and is_video:
             green_cycle = t_sec % 22.0
             green_start = 9.0
             green_dur = 2.4
-            
+
             if green_start <= green_cycle < (green_start + green_dur):
                 dt = green_cycle - green_start
-                # Phase 1 & 2: Pause video on frozen frame & expand electric cracks
+                # Capture the freeze frame on first entry
                 if self.frozen_green_frame is None or dt < 0.1:
                     self.frozen_green_frame = frame.copy()
 
+                # Use frozen frame while cracks are building; revert to live on fade-out
                 out_base = self.frozen_green_frame.copy() if dt < 1.3 else frame.copy()
-                
-                # Crack progress: expand from 0.0 to 1.0, then fade out
-                if dt < 1.3:
-                    prog = dt / 1.3
-                    cracks = self.generate_green_light_cracks(w, h, prog, rng)
-                    return cv2.add(out_base, cracks)
-                else:
-                    fade = 1.0 - ((dt - 1.3) / 1.1)
-                    cracks = self.generate_green_light_cracks(w, h, fade, rng)
-                    return cv2.add(out_base, cracks)
+
+                # Crack progress: 0→1 over first 1.3s, then 1→0 over the remaining 1.1s
+                prog = (dt / 1.3) if dt < 1.3 else max(0.0, 1.0 - ((dt - 1.3) / 1.1))
+
+                # ── Deep emerald-green screen wash (whole frame goes green) ──
+                # Boost green channel, suppress red and blue — amount scales with progress
+                green_strength = prog * green_v
+                tinted = out_base.astype(np.float32)
+                tinted[:, :, 0] = np.clip(tinted[:, :, 0] * (1.0 - green_strength * 0.75), 0, 255)   # kill blue
+                tinted[:, :, 1] = np.clip(tinted[:, :, 1] * (1.0 + green_strength * 1.20), 0, 255)   # boost green
+                tinted[:, :, 2] = np.clip(tinted[:, :, 2] * (1.0 - green_strength * 0.60), 0, 255)   # suppress red
+                # Add solid dark-green additive wash so even dark areas go green
+                tinted[:, :, 1] = np.clip(tinted[:, :, 1] + green_strength * 55.0, 0, 255)
+                tinted_frame = tinted.astype(np.uint8)
+
+                # ── Voronoi cracked-glass seam overlay ──
+                cracks = self.generate_green_light_cracks(w, h, prog, rng)
+                return cv2.add(tinted_frame, cracks)
             else:
                 self.frozen_green_frame = None
 
@@ -1153,7 +1289,7 @@ class MisrememberedDesktopApp(ctk.CTk):
 
             # ── AUDIO PROCESSING WITH KANE PIXELS DSP ──
             if FFMPEG:
-                self.add_log("Processing Backrooms audio DSP (tape wow, liminal reverb, fluorescent hum)...", "info")
+                self.add_log("Processing Backrooms audio DSP (tape wow, liminal reverb, fluorescent hum, ambient drone, jingle)...", "info")
                 ext_cmd = [FFMPEG, "-y", "-i", in_path, "-vn", "-ac", "2", "-ar", "44100", temp_in_wav]
                 subprocess.run(ext_cmd, capture_output=True, timeout=60)
 
@@ -1162,19 +1298,25 @@ class MisrememberedDesktopApp(ctk.CTk):
                 if has_audio:
                     try:
                         sr, raw_audio = wavfile.read(temp_in_wav)
-                        proc_audio = KanePixelsAudioDSP.process_full_audio(raw_audio, sr=sr, seed=seed, sliders=sliders)
+                        proc_audio = KanePixelsAudioDSP.process_full_audio(
+                            raw_audio, sr=sr, seed=seed, sliders=sliders,
+                            fps=fps, total_frames=total_frames
+                        )
                         wavfile.write(temp_out_wav, sr, proc_audio)
                     except Exception as e:
                         dbg(f"Audio DSP error on input audio: {e}", "ERROR")
                         has_audio = False
 
                 if not has_audio:
+                    # No source audio — synthesize a full atmospheric layer from scratch
                     sr = 44100
                     duration_s = max(1.0, total_frames / float(fps))
                     n_samples = int(sr * duration_s)
-                    dbg(f"Synthesizing {duration_s:.1f}s Backrooms atmospheric drone...", "AUDIO")
+                    dbg(f"Synthesizing {duration_s:.1f}s full Backrooms atmospheric audio (no source audio)...", "AUDIO")
                     hum = KanePixelsAudioDSP.synthesize_fluorescent_hum(n_samples, sr=sr, gain=0.045)
-                    wavfile.write(temp_out_wav, sr, (hum * 32767.0).astype(np.int16))
+                    ambient = KanePixelsAudioDSP.synthesize_liminal_ambient(n_samples, sr=sr, gain=0.048)
+                    combined = np.clip((hum + ambient) * 32767.0, -32767.0, 32767.0).astype(np.int16)
+                    wavfile.write(temp_out_wav, sr, combined)
 
                 # Remux with FFmpeg
                 self.add_log("Remuxing final high-fidelity video & audio payload...", "info")
