@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.2.0-FULL-PIPELINE"
+APP_VERSION = "v4.3.0-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -544,107 +544,130 @@ class LocalGlyphCorruptor:
     def corrupt_actual_frame_text(bgr_img, rng, intensity=0.85, frame_idx=0, fps=30.0):
         h, w = bgr_img.shape[:2]
         gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
-        
-        # Fast 4x Accelerated Sobel Gradient on Half-Resolution
+
+        # Detect text regions at half resolution for speed
         scale_factor = 2
         gray_small = cv2.resize(gray, (w // scale_factor, h // scale_factor), interpolation=cv2.INTER_LINEAR)
         grad_x = cv2.Sobel(gray_small, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray_small, cv2.CV_32F, 0, 1, ksize=3)
-        grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (8, 2)))
+        grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE,
+                                cv2.getStructuringElement(cv2.MORPH_RECT, (8, 2)))
         grad_norm = cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
         _, thresh = cv2.threshold(grad_norm, 55, 255, cv2.THRESH_BINARY)
-        connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (10, 4)))
+        connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE,
+                                     cv2.getStructuringElement(cv2.MORPH_RECT, (10, 4)))
         contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        out = bgr_img.copy()
-        pil_img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+        # Work on PIL canvas from the start — this will be our output
+        pil_img = Image.fromarray(cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil_img)
 
         corrupted_count = 0
-        max_corrupt = 6
+        max_corrupt = 7
 
         for cnt in contours:
             if corrupted_count >= max_corrupt:
                 break
 
             sx, sy, sbw, sbh = cv2.boundingRect(cnt)
-            # Scale coordinates back up to full resolution
-            x, y, bw, bh = sx * scale_factor, sy * scale_factor, sbw * scale_factor, sbh * scale_factor
+            x, y = sx * scale_factor, sy * scale_factor
+            bw, bh = sbw * scale_factor, sbh * scale_factor
             aspect = bw / float(max(1, bh))
             area = bw * bh
 
-            if 25 < bw < w * 0.95 and 10 < bh < h * 0.40 and aspect > 1.1 and area > 350:
-                if rng.random() > intensity:
-                    continue
+            if not (25 < bw < w * 0.95 and 10 < bh < h * 0.40 and aspect > 1.1 and area > 350):
+                continue
+            if rng.random() > intensity:
+                continue
 
-                roi = gray[y:y+bh, x:x+bw]
-                is_white_bg = np.mean(roi) > 135
+            roi_gray = gray[y:y+bh, x:x+bw]
+            if roi_gray.size == 0:
+                continue
 
-                # ── COMPOUNDING KANE PIXELS "FORGETS / STILL LIFE" TEXT DISTORTION ──
-                patch = out[y:y+bh, x:x+bw].copy()
-                if patch.size == 0:
-                    continue
+            is_white_bg = np.mean(roi_gray) > 135
+            bg_col = (255, 255, 255) if is_white_bg else (10, 10, 10)
+            fg_col = (10, 10, 10) if is_white_bg else (240, 240, 240)
 
-                # 1. In-Place Razor Glyph Serration & Vertical Slicing (Ref 3)
-                if intensity > 0.20:
-                    strip_w = max(2, int(bh * 0.16))
-                    for sx_pos in range(0, bw, strip_w * 2):
-                        ex_pos = min(bw, sx_pos + strip_w)
-                        shift = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bh * 0.10)))
-                        M = np.float32([[1, 0, 0], [0, 1, shift]])
-                        patch[:, sx_pos:ex_pos] = cv2.warpAffine(patch[:, sx_pos:ex_pos], M, (ex_pos - sx_pos, bh), borderMode=cv2.BORDER_REFLECT)
-                    out[y:y+bh, x:x+bw] = patch
+            # ── STEP 1: ERASE the original text (flood with background) ──
+            # Slight random offset to simulate AI mis-locating the region
+            ex = x + rng.randint(-int(bw * 0.04), int(bw * 0.04))
+            ey = y + rng.randint(-int(bh * 0.10), int(bh * 0.10))
+            ew = bw + rng.randint(-int(bw * 0.05), int(bw * 0.05))
+            eh = bh + rng.randint(-int(bh * 0.05), int(bh * 0.05))
+            draw.rectangle([ex, ey, ex + ew, ey + eh], fill=bg_col)
 
-                # 2. Horizontal Bisect & Inversion Seam (Ref 4)
-                if intensity > 0.35 and rng.random() < 0.45:
-                    half_h = bh // 2
-                    if half_h > 2:
-                        flipped_lower = cv2.flip(patch[half_h:, :], -1)
-                        patch[half_h:, :] = cv2.addWeighted(flipped_lower, 0.85, patch[half_h:, :], 0.15, 0)
-                        bar_h = max(2, int(bh * 0.10))
-                        patch[half_h-bar_h//2:half_h+bar_h//2, :] = 0
-                        out[y:y+bh, x:x+bw] = patch
+            # ── STEP 2: Render corrupted replacement text in same area ──
+            # Word count estimated from region width
+            est_word_count = max(1, int(bw / max(1, bh * 4.5)))
+            words = []
+            for _ in range(est_word_count):
+                wlen = rng.randint(3, 9)
+                words.append(LocalGlyphCorruptor.generate_phonetic_mutation(wlen, rng))
+            replacement = " ".join(words)
 
-                # 3. Angled Ghost Trailing & Offset Duplicate Layers (Ref 2)
-                if intensity > 0.25 and rng.random() < 0.80:
-                    shift_x = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bw * 0.03)))
-                    shift_y = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bh * 0.08)))
-                    M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-                    ghost = cv2.warpAffine(patch, M, (bw, bh), borderMode=cv2.BORDER_REFLECT)
-                    out[y:y+bh, x:x+bw] = cv2.addWeighted(out[y:y+bh, x:x+bw], 0.60, ghost, 0.40, 0)
+            # Font size: stay close to original height, vary slightly
+            f_size = max(10, int(bh * rng.uniform(0.55, 0.82)))
+            try:
+                # Vary the font between a few system fonts for the "different font" effect
+                font_candidates = ["arial.ttf", "arialbd.ttf", "calibri.ttf", "verdana.ttf",
+                                   "times.ttf", "couri.ttf"]
+                chosen_font = rng.choice(font_candidates)
+                font = ImageFont.truetype(chosen_font, f_size)
+            except Exception:
+                try:
+                    font = ImageFont.truetype("arial.ttf", f_size)
+                except Exception:
+                    font = ImageFont.load_default()
 
-                # 4. Vertical Barcode Smear / Dripping Lines (Ref 5)
-                if intensity > 0.40 and rng.random() < 0.70:
-                    drip_len = rng.randint(int(bh * 0.8), int(bh * 1.8))
-                    bottom_row = patch[-2:, :, :]
-                    drip_block = np.repeat(bottom_row[-1:, :, :], drip_len, axis=0)
-                    y_end = min(h, y + bh + drip_len)
-                    act_len = y_end - (y + bh)
-                    if act_len > 0:
-                        out[y+bh:y_end, x:x+bw] = cv2.addWeighted(out[y+bh:y_end, x:x+bw], 0.35, drip_block[:act_len, :], 0.65, 0)
+            # Position: same region, slightly different x/y for that "AI re-typed it slightly off" feel
+            tx = ex + rng.randint(2, max(3, int(bw * 0.05)))
+            ty = ey + max(1, int((eh - f_size) / 2))
+            draw.text((tx, ty), replacement, fill=fg_col, font=font)
 
-                # 5. Inpainted Box & Phonetic / Multi-Language Overlays (Ref 1)
-                if intensity > 0.30 and rng.random() < 0.75:
-                    bg_col = (255, 255, 255) if is_white_bg else (10, 10, 10)
-                    fg_col = (10, 10, 10) if is_white_bg else (245, 245, 245)
-                    
-                    ox = x + rng.randint(-int(bw*0.06), int(bw*0.06))
-                    oy = y + rng.randint(-int(bh*0.12), int(bh*0.12))
-                    draw.rectangle([ox, oy, ox + bw, oy + bh], fill=bg_col)
-
-                    mutation_text = LocalGlyphCorruptor.generate_phonetic_mutation(rng.randint(3, 7), rng)
-                    f_size = max(11, int(bh * 0.68))
-                    try:
-                        font = ImageFont.truetype("arial.ttf", f_size)
-                    except Exception:
-                        font = ImageFont.load_default()
-                    draw.text((ox + 4, oy + max(1, int((bh - f_size)/2))), mutation_text, fill=fg_col, font=font)
-
+            # ── STEP 3: Convert back to BGR patch and apply distortions ──
+            # (apply glyph distortions to the REPLACEMENT text, not original)
+            out_so_far = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            patch = out_so_far[y:y+bh, x:x+bw].copy()
+            if patch.size == 0:
                 corrupted_count += 1
+                continue
 
-        pil_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        return cv2.addWeighted(out, 0.5, pil_bgr, 0.5, 0)
+            # Ghost offset duplicate (subtle — 3-6% shift)
+            if rng.random() < 0.75:
+                shift_x = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bw * 0.03)))
+                shift_y = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bh * 0.08)))
+                M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+                ghost = cv2.warpAffine(patch, M, (bw, bh), borderMode=cv2.BORDER_REFLECT)
+                patch = cv2.addWeighted(patch, 0.65, ghost, 0.35, 0)
+
+            # Vertical strip micro-shift (razor serration)
+            if intensity > 0.30:
+                strip_w = max(2, int(bh * 0.16))
+                for sx_pos in range(0, bw, strip_w * 2):
+                    ex_pos = min(bw, sx_pos + strip_w)
+                    shift = rng.choice([-1, 1]) * rng.randint(0, max(1, int(bh * 0.08)))
+                    Mp = np.float32([[1, 0, 0], [0, 1, shift]])
+                    patch[:, sx_pos:ex_pos] = cv2.warpAffine(
+                        patch[:, sx_pos:ex_pos], Mp, (ex_pos - sx_pos, bh),
+                        borderMode=cv2.BORDER_REFLECT
+                    )
+
+            # Bisect + invert lower half (40% chance)
+            if intensity > 0.40 and rng.random() < 0.40:
+                half_h = bh // 2
+                if half_h > 2:
+                    flipped_lower = cv2.flip(patch[half_h:, :], -1)
+                    patch[half_h:, :] = cv2.addWeighted(flipped_lower, 0.80, patch[half_h:, :], 0.20, 0)
+
+            # Write the distorted patch back
+            out_so_far[y:y+bh, x:x+bw] = patch
+            pil_img = Image.fromarray(cv2.cvtColor(out_so_far, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(pil_img)
+
+            corrupted_count += 1
+
+        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
