@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.3.0-FULL-PIPELINE"
+APP_VERSION = "v4.3.1-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -588,12 +588,15 @@ class LocalGlyphCorruptor:
             bg_col = (255, 255, 255) if is_white_bg else (10, 10, 10)
             fg_col = (10, 10, 10) if is_white_bg else (240, 240, 240)
 
-            # ── STEP 1: ERASE the original text (flood with background) ──
-            # Slight random offset to simulate AI mis-locating the region
-            ex = x + rng.randint(-int(bw * 0.04), int(bw * 0.04))
-            ey = y + rng.randint(-int(bh * 0.10), int(bh * 0.10))
-            ew = bw + rng.randint(-int(bw * 0.05), int(bw * 0.05))
-            eh = bh + rng.randint(-int(bh * 0.05), int(bh * 0.05))
+            # ── STEP 1: ERASE the original text ──
+            # Sobel gradient bbox captures only character EDGES, not full glyph bodies.
+            # Expand significantly to fully cover ascenders, descenders, and thick strokes.
+            pad_x = int(bw * 0.08)
+            pad_y = int(bh * 0.40)   # large vertical pad — ascenders/descenders extend far beyond edge bbox
+            ex = max(0, x - pad_x)
+            ey = max(0, y - pad_y)
+            ew = min(w - ex, bw + pad_x * 2)
+            eh = min(h - ey, bh + pad_y * 2)
             draw.rectangle([ex, ey, ex + ew, ey + eh], fill=bg_col)
 
             # ── STEP 2: Render corrupted replacement text in same area ──
@@ -626,8 +629,9 @@ class LocalGlyphCorruptor:
 
             # ── STEP 3: Convert back to BGR patch and apply distortions ──
             # (apply glyph distortions to the REPLACEMENT text, not original)
+            # Use the expanded erase box coords so we distort the full replacement area
             out_so_far = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-            patch = out_so_far[y:y+bh, x:x+bw].copy()
+            patch = out_so_far[ey:ey+eh, ex:ex+ew].copy()
             if patch.size == 0:
                 corrupted_count += 1
                 continue
@@ -654,13 +658,13 @@ class LocalGlyphCorruptor:
 
             # Bisect + invert lower half (40% chance)
             if intensity > 0.40 and rng.random() < 0.40:
-                half_h = bh // 2
+                half_h = eh // 2
                 if half_h > 2:
                     flipped_lower = cv2.flip(patch[half_h:, :], -1)
                     patch[half_h:, :] = cv2.addWeighted(flipped_lower, 0.80, patch[half_h:, :], 0.20, 0)
 
-            # Write the distorted patch back
-            out_so_far[y:y+bh, x:x+bw] = patch
+            # Write the distorted patch back (use expanded box coords)
+            out_so_far[ey:ey+eh, ex:ex+ew] = patch
             pil_img = Image.fromarray(cv2.cvtColor(out_so_far, cv2.COLOR_BGR2RGB))
             draw = ImageDraw.Draw(pil_img)
 
