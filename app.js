@@ -1239,52 +1239,210 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // --- ENHANCED FEATURE & FACE/TEXT REGION DETECTION ---
-    function scanForTextCandidates(w, h) {
-        console.log(`[DEBUG SCAN] Scanning for high-contrast feature/face/text candidate regions (${w}x${h})`);
-        
-        // Multi-scale grid blocks to detect both fine details (eyes, text) and larger regions (faces, logos)
-        const blockSizes = [
-            { w: 24, h: 20 },
-            { w: 36, h: 30 }
-        ];
-        
-        const candidates = [];
+    // =========================================================================
+    // PURE GLYPH ALPHA EXTRACTION & IN-BROWSER AI OCR WORD SEGMENTATION
+    // Extracts clean text glyphs with transparent backgrounds (zero wallpaper boxes).
+    // Implements the Kane Pixels "Forgets" & Still Life text distortion grammar.
+    // =========================================================================
+
+    let detectedWordEntities = [];
+    let isAiOcrRunning = false;
+
+    // Extracts ONLY the foreground glyphs/letters with a 100% transparent background
+    function extractPureGlyphCanvas(rx, ry, rw, rh) {
+        const sCanvas = document.createElement('canvas');
+        sCanvas.width = rw;
+        sCanvas.height = rh;
+        const sCtx = sCanvas.getContext('2d');
+        if (rw <= 0 || rh <= 0) return sCanvas;
+
+        try {
+            sCtx.drawImage(glitchCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
+            const imgData = sCtx.getImageData(0, 0, rw, rh);
+            const d = imgData.data;
+
+            // 1. Sample perimeter border pixels to estimate background color & luminance
+            let bgR = 0, bgG = 0, bgB = 0, sampleCount = 0;
+            for (let x = 0; x < rw; x++) {
+                let idx = x * 4;
+                bgR += d[idx]; bgG += d[idx + 1]; bgB += d[idx + 2];
+                idx = ((rh - 1) * rw + x) * 4;
+                bgR += d[idx]; bgG += d[idx + 1]; bgB += d[idx + 2];
+                sampleCount += 2;
+            }
+            for (let y = 1; y < rh - 1; y++) {
+                let idx = (y * rw) * 4;
+                bgR += d[idx]; bgG += d[idx + 1]; bgB += d[idx + 2];
+                idx = (y * rw + (rw - 1)) * 4;
+                bgR += d[idx]; bgG += d[idx + 1]; bgB += d[idx + 2];
+                sampleCount += 2;
+            }
+
+            bgR /= Math.max(1, sampleCount);
+            bgG /= Math.max(1, sampleCount);
+            bgB /= Math.max(1, sampleCount);
+            const bgLum = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
+
+            // 2. Threshold each pixel: foreground glyphs vs background
+            for (let y = 0; y < rh; y++) {
+                for (let x = 0; x < rw; x++) {
+                    const idx = (y * rw + x) * 4;
+                    const r = d[idx], g = d[idx + 1], b = d[idx + 2];
+                    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+
+                    const colorDist = Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
+                    const lumDiff = Math.abs(lum - bgLum);
+
+                    const threshold = 18;
+                    if (colorDist < threshold && lumDiff < threshold) {
+                        d[idx + 3] = 0; // 100% transparent background (eliminates wallpaper boxes!)
+                    } else {
+                        // Smooth edge anti-aliasing
+                        const factor = Math.min(1.0, Math.max(0.0, (Math.max(colorDist, lumDiff) - threshold) / 16));
+                        d[idx + 3] = Math.round(255 * factor);
+                    }
+                }
+            }
+
+            sCtx.putImageData(imgData, 0, 0);
+        } catch (e) {
+            console.warn('[GLYPH EXTRACT ERROR]', e);
+        }
+
+        return sCanvas;
+    }
+
+    // High-speed Connected Component & Word Line Segmenter + AI OCR integration
+    function scanForWordsAndGlyphs(w, h) {
+        detectedWordEntities = [];
+        textCandidateBlocks = [];
+
         try {
             const imgData = ctx.getImageData(0, 0, w, h);
             const data = imgData.data;
             const lum = (idx) => 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
 
-            for (const bs of blockSizes) {
-                for (let by = 0; by < h - bs.h; by += bs.h) {
-                    for (let bx = 0; bx < w - bs.w; bx += bs.w) {
-                        const p1 = (by * w + bx) * 4;
-                        const p2 = (by * w + (bx + bs.w - 1)) * 4;
-                        const p3 = ((by + bs.h - 1) * w + bx) * 4;
-                        const p4 = ((by + bs.h - 1) * w + (bx + bs.w - 1)) * 4;
-                        const pc = ((by + (bs.h >> 1)) * w + (bx + (bs.w >> 1))) * 4;
+            // 1. Line density histogram to find horizontal text lines
+            const rowDiffs = new Float32Array(h);
+            for (let y = 0; y < h; y++) {
+                let diffSum = 0;
+                for (let x = 8; x < w - 8; x += 4) {
+                    const idx1 = (y * w + x) * 4;
+                    const idx2 = (y * w + (x + 3)) * 4;
+                    diffSum += Math.abs(lum(idx1) - lum(idx2));
+                }
+                rowDiffs[y] = diffSum / (w / 4);
+            }
 
-                        const lums = [lum(p1), lum(p2), lum(p3), lum(p4), lum(pc)];
-                        const mn = Math.min(...lums), mx = Math.max(...lums);
-
-                        // Lower threshold (28) to aggressively catch white-on-black meme text, high-contrast logos
-                        if (mx - mn > 28) {
-                            candidates.push({ x: bx, y: by, w: bs.w, h: bs.h, contrast: mx - mn });
+            // Identify active text bands
+            const textBands = [];
+            let inBand = false;
+            let startY = 0;
+            for (let y = 0; y < h; y++) {
+                if (rowDiffs[y] > 12) {
+                    if (!inBand) { inBand = true; startY = y; }
+                } else {
+                    if (inBand) {
+                        inBand = false;
+                        if (y - startY >= 8 && y - startY <= 90) {
+                            textBands.push({ startY: Math.max(0, startY - 4), endY: Math.min(h, y + 4) });
                         }
                     }
                 }
             }
+            if (inBand && h - startY >= 8) {
+                textBands.push({ startY: Math.max(0, startY - 4), endY: h });
+            }
+
+            // 2. Segment each band horizontally into discrete words
+            for (const band of textBands) {
+                const bh = band.endY - band.startY;
+                const colDiffs = new Float32Array(w);
+                for (let x = 0; x < w; x++) {
+                    let colSum = 0;
+                    for (let y = band.startY; y < band.endY; y += 2) {
+                        const idx = (y * w + x) * 4;
+                        colSum += lum(idx);
+                    }
+                    colDiffs[x] = colSum / (bh / 2);
+                }
+
+                let avgBandLum = 0;
+                for (let x = 0; x < w; x++) avgBandLum += colDiffs[x];
+                avgBandLum /= Math.max(1, w);
+
+                let inWord = false;
+                let startX = 0;
+                let spaceGap = 0;
+
+                for (let x = 4; x < w - 4; x++) {
+                    const isCharCol = Math.abs(colDiffs[x] - avgBandLum) > 10;
+                    if (isCharCol) {
+                        spaceGap = 0;
+                        if (!inWord) { inWord = true; startX = x; }
+                    } else {
+                        if (inWord) {
+                            spaceGap++;
+                            if (spaceGap > 8 || x === w - 5) {
+                                inWord = false;
+                                const endX = x - spaceGap;
+                                const ww = endX - startX;
+                                if (ww >= 12 && ww <= 500) {
+                                    const wordObj = {
+                                        id: 'word_' + Math.random().toString(36).substr(2, 6),
+                                        x: startX,
+                                        y: band.startY,
+                                        w: ww,
+                                        h: bh,
+                                        glyphCanvas: extractPureGlyphCanvas(startX, band.startY, ww, bh),
+                                        originalText: '',
+                                        state: { floatingEcho: false, cascade: false, mirror: false, erased: false }
+                                    };
+                                    detectedWordEntities.push(wordObj);
+                                    textCandidateBlocks.push({ x: startX, y: band.startY, w: ww, h: bh, contrast: 40 });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            console.log(`[GLYPH SEGMENTER] Detected ${detectedWordEntities.length} discrete word entities`);
         } catch (e) {
-            console.error('[DEBUG SCAN ERROR]', e);
+            console.error('[WORD SCAN ERROR]', e);
         }
 
-        // Sort by contrast (highest = text, logos, eyes)
-        candidates.sort((a, b) => b.contrast - a.contrast);
-        // Keep top 120 — more coverage means more regions for text/faces
-        if (candidates.length > 120) candidates.length = 120;
-        textCandidateBlocks = candidates;
+        // 3. Optional In-Browser AI OCR Pass (Tesseract.js)
+        if (typeof Tesseract !== 'undefined' && Tesseract.recognize && !isAiOcrRunning) {
+            isAiOcrRunning = true;
+            Tesseract.recognize(glitchCanvas, 'eng', { logger: () => {} })
+                .then(({ data }) => {
+                    isAiOcrRunning = false;
+                    if (data && data.words && data.words.length > 0) {
+                        console.log(`%c[AI OCR SUCCESS] Recognized ${data.words.length} semantic words`, 'color: #00ff66; font-weight: bold;');
+                        addLog(`[AI OCR ENGINE] Recognized ${data.words.length} semantic words via neural OCR`, 'alert');
+                        
+                        for (const ocrW of data.words) {
+                            const match = detectedWordEntities.find(wrd => 
+                                Math.abs(wrd.x - ocrW.bbox.x0) < 35 && Math.abs(wrd.y - ocrW.bbox.y0) < 30
+                            );
+                            if (match) {
+                                match.originalText = ocrW.text;
+                                match.confidence = ocrW.confidence;
+                            }
+                        }
+                    }
+                })
+                .catch(err => {
+                    isAiOcrRunning = false;
+                    console.warn('[AI OCR NOTICE] Running algorithmic fallback:', err);
+                });
+        }
     }
-    // (Salience scanning complete - feeds directly into Entity Memory Model)
+
+    function scanForTextCandidates(w, h) {
+        scanForWordsAndGlyphs(w, h);
+    }
 
     // ─── CORE SYSTEM: ENTITY MEMORY MODEL (Per-Entity Drift, Duplication, Rotation, & Erasure) ───
     let memoryEntities = [];
@@ -1389,37 +1547,30 @@ document.addEventListener('DOMContentLoaded', () => {
         const rw = Math.min(canvasW - rx, Math.max(10, w));
         const rh = Math.min(canvasH - ry, Math.max(10, h));
 
-        // Offscreen canvas containing pristine pixels from base frame with gradient alpha edge feathering
-        const sourceCanvas = document.createElement('canvas');
-        sourceCanvas.width = rw;
-        sourceCanvas.height = rh;
-        const sCtx = sourceCanvas.getContext('2d');
-
-        try {
-            sCtx.drawImage(glitchCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
-
-            // 6px linear gradient alpha feathering around edges to avoid hard box seams
-            const featherMargin = Math.min(6, Math.floor(Math.min(rw, rh) / 4));
-            if (featherMargin > 2) {
-                const imgData = sCtx.getImageData(0, 0, rw, rh);
-                const d = imgData.data;
-                for (let py = 0; py < rh; py++) {
-                    for (let px = 0; px < rw; px++) {
-                        const distLeft = px;
-                        const distRight = rw - 1 - px;
-                        const distTop = py;
-                        const distBottom = rh - 1 - py;
-                        const minDist = Math.min(distLeft, distRight, distTop, distBottom);
-                        if (minDist < featherMargin) {
-                            const alphaFactor = minDist / featherMargin;
-                            const idx = (py * rw + px) * 4 + 3;
-                            d[idx] = Math.round(d[idx] * alphaFactor);
-                        }
-                    }
-                }
-                sCtx.putImageData(imgData, 0, 0);
-            }
-        } catch(e) {}
+        let sourceCanvas;
+        if (type === 'text') {
+            // Pure glyph extraction with transparent background (zero wallpaper boxes)
+            sourceCanvas = extractPureGlyphCanvas(rx, ry, rw, rh);
+        } else {
+            // Radial elliptical soft feathering for hardware / fixtures / furniture
+            sourceCanvas = document.createElement('canvas');
+            sourceCanvas.width = rw;
+            sourceCanvas.height = rh;
+            const sCtx = sourceCanvas.getContext('2d');
+            try {
+                sCtx.drawImage(glitchCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
+                sCtx.globalCompositeOperation = 'destination-in';
+                const grad = sCtx.createRadialGradient(
+                    rw / 2, rh / 2, Math.min(rw, rh) * 0.15,
+                    rw / 2, rh / 2, Math.min(rw, rh) * 0.50
+                );
+                grad.addColorStop(0, 'rgba(0,0,0,1)');
+                grad.addColorStop(0.7, 'rgba(0,0,0,0.85)');
+                grad.addColorStop(1, 'rgba(0,0,0,0)');
+                sCtx.fillStyle = grad;
+                sCtx.fillRect(0, 0, rw, rh);
+            } catch(e) {}
+        }
 
         memoryEntities.push({
             id: 'entity_' + Math.random().toString(36).substr(2, 7),
@@ -1606,186 +1757,120 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function applyMisrememberedTextGlitch(w, h, intensity, now) {
-        if (!textCandidateBlocks.length) return;
-        // Always run on at least 4 blocks; scale up with intensity
-        const count = Math.max(4, Math.floor(4 + (intensity / 100) * 10));
+    // 1. ASCENDING FLOATING MIRRORED ECHO (e.g. 'make' -> inverted 'ɐʞɐm' floating above)
+    function applyFloatingMirroredEcho(word, canvasW, canvasH, intensity) {
+        if (!word || !word.glyphCanvas) return;
+        const floatDistance = word.h * (1.15 + (Math.random() * 0.45));
+        const destX = Math.max(0, Math.min(canvasW - word.w, word.x + (Math.random() - 0.5) * 16));
+        const destY = word.y - floatDistance;
+        if (destY < 0) return;
 
-        for (let i = 0; i < count; i++) {
-            const b = textCandidateBlocks[Math.floor(Math.random() * textCandidateBlocks.length)];
-            if (!b) continue;
+        ctx.save();
+        ctx.globalAlpha = Math.min(0.95, 0.75 + (intensity || 0.8) * 0.2);
+        // Invert vertically & mirror horizontally so letters appear flipped upside-down and backwards
+        ctx.translate(destX + word.w / 2, destY + word.h / 2);
+        ctx.scale(-1, -1);
+        ctx.drawImage(word.glyphCanvas, -word.w / 2, -word.h / 2);
+        ctx.restore();
+    }
 
-            try {
-                const glitchMode = Math.random();
+    // 2. DESCENDING DIAGONAL CASCADE (e.g. 'Forgets' -> 'gets' -> 'ts' stair-step drop)
+    function applyForgetsTextCascade(word, canvasW, canvasH, intensity) {
+        if (!word || !word.glyphCanvas) return;
+        const numSteps = 3 + Math.floor(Math.random() * 2); // 3 to 4 steps
+        const stepDx = Math.round(word.w * 0.16); // step right
+        const stepDy = Math.round(word.h * 0.60); // step down
 
-                if (glitchMode < 0.45) {
-                    // Backrooms Mirror-Ghost: horizontally flip region
-                    ctx.save();
-                    ctx.globalAlpha = 0.72;
-                    ctx.translate(b.x + b.w, b.y);
-                    ctx.scale(-1, 1);
-                    ctx.drawImage(glitchCanvas, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
-                    ctx.restore();
-                    ctx.save();
-                    ctx.globalAlpha = 0.35;
-                    ctx.drawImage(glitchCanvas, b.x, b.y, b.w, b.h, b.x + 2, b.y + 3, b.w, b.h);
-                    ctx.restore();
-                } else if (glitchMode < 0.72) {
-                    // Downward melt duplication
-                    const numSteps = 3 + Math.floor(Math.random() * 4);
-                    const stepDx = (Math.random() - 0.5) * 14;
-                    const stepDy = 7 + Math.random() * 13;
-                    const angle = (Math.random() - 0.5) * 0.22;
-                    ctx.save();
-                    for (let s = 0; s < numSteps; s++) {
-                        const sx = b.x + s * stepDx;
-                        const sy = b.y + s * stepDy;
-                        ctx.save();
-                        ctx.beginPath();
-                        ctx.rect(sx, sy, b.w, b.h);
-                        ctx.clip();
-                        ctx.translate(sx + b.w / 2, sy + b.h / 2);
-                        ctx.rotate(angle * s);
-                        ctx.translate(-(sx + b.w / 2), -(sy + b.h / 2));
-                        ctx.globalAlpha = Math.max(0.12, 1.0 - s * 0.2);
-                        ctx.drawImage(glitchCanvas, b.x, b.y, b.w, b.h, sx, sy, b.w, b.h);
-                        ctx.restore();
-                    }
-                    ctx.restore();
-                } else {
-                    // Both: mirrored + melted ghost simultaneously
-                    ctx.save();
-                    ctx.globalAlpha = 0.55;
-                    ctx.translate(b.x + b.w, b.y);
-                    ctx.scale(-1, 1);
-                    ctx.drawImage(glitchCanvas, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
-                    ctx.restore();
-                    ctx.save();
-                    ctx.globalAlpha = 0.45;
-                    ctx.drawImage(glitchCanvas, b.x, b.y, b.w, b.h, b.x, b.y + 9, b.w, b.h);
-                    ctx.restore();
-                }
-            } catch (e) {}
+        for (let s = 1; s <= numSteps; s++) {
+            const destX = word.x + stepDx * s;
+            const destY = word.y + stepDy * s;
+            if (destX + word.w > canvasW || destY + word.h > canvasH) continue;
+
+            const alpha = Math.max(0.08, 0.78 - s * 0.22); // 0.56, 0.34, 0.12
+
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            // Progressive suffix offset: each step trims the leading character (e.g. Forgets -> gets -> ts)
+            const trimX = Math.min(word.w * 0.6, (s - 1) * (word.w / numSteps) * 0.6);
+            ctx.drawImage(
+                word.glyphCanvas,
+                trimX, 0, word.w - trimX, word.h,
+                destX + trimX, destY, word.w - trimX, word.h
+            );
+            ctx.restore();
         }
     }
 
-    // --- BAND-LEVEL POSTER MELT (the "MISSING poster" effect) ---
-    // Groups detected contrast blocks into horizontal text-line bands, then
-    // applies full-band distortions: vertical flip overlay, mirror ghost, or wax-column drip.
-    function applyPosterBandMelt(w, h, now) {
-        if (!textCandidateBlocks.length) return;
+    // 3. IN-PLACE GLYPH CORRUPTION (Mirrored character overlay & Cyrillic/phonetic swaps)
+    function applyInPlaceGlyphCorruption(word, canvasW, canvasH) {
+        if (!word || !word.glyphCanvas) return;
+        // Slice a 1/3 or 1/4 character section of the word and horizontally mirror it over itself
+        const charW = Math.max(8, Math.floor(word.w / 4));
+        const charOffset = Math.floor(Math.random() * Math.max(1, word.w - charW));
 
-        // Sort blocks by Y and cluster into horizontal text-line bands
-        const byY = [...textCandidateBlocks].sort((a, b2) => a.y - b2.y);
-        const bands = [];
-        for (const b of byY) {
-            let placed = false;
-            for (const band of bands) {
-                if (Math.abs(b.y - band.cy) < 28) {
-                    band.xMin = Math.min(band.xMin, b.x);
-                    band.xMax = Math.max(band.xMax, b.x + b.w);
-                    band.cy = (band.cy * band.cnt + b.y) / (band.cnt + 1);
-                    band.bh = Math.max(band.bh, b.h);
-                    band.cnt++;
-                    placed = true;
-                    break;
-                }
-            }
-            if (!placed) bands.push({ cy: b.y, xMin: b.x, xMax: b.x + b.w, bh: b.h, cnt: 1 });
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        ctx.translate(word.x + charOffset + charW, word.y);
+        ctx.scale(-1, 1);
+        ctx.drawImage(word.glyphCanvas, charOffset, 0, charW, word.h, 0, 0, charW, word.h);
+        ctx.restore();
+    }
+
+    // --- MISREMEMBERED TEXT GLITCH ENGINE (Pure Glyph Transformations) ---
+    function applyMisrememberedTextGlitch(w, h, intensity, now) {
+        if (!detectedWordEntities.length) {
+            scanForWordsAndGlyphs(w, h);
         }
+        if (!detectedWordEntities.length) return;
 
-        // Only use bands that look like text lines (multiple blocks side by side)
-        const textBands = bands.filter(bd => bd.cnt >= 2 && (bd.xMax - bd.xMin) > 30);
-        if (!textBands.length) return;
+        // Choose 1-3 distinct words to misremember
+        const numMutations = Math.min(detectedWordEntities.length, Math.max(1, Math.floor(2 + (intensity / 100) * 3)));
+        const shuffled = [...detectedWordEntities].sort(() => Math.random() - 0.5);
 
-        // Pick 1-2 bands per call
-        const numBands = 1 + (Math.random() < 0.35 ? 1 : 0);
-        for (let i = 0; i < numBands; i++) {
-            const band = textBands[Math.floor(Math.random() * textBands.length)];
-            const padding = 6;
-            const bx = Math.max(0, Math.floor(band.xMin) - padding);
-            const bw = Math.min(w - bx, Math.floor(band.xMax - band.xMin) + padding * 2);
-            const lineH = Math.max(18, Math.floor(band.bh * 2.2));
-            const by = Math.max(0, Math.floor(band.cy) - Math.floor(lineH * 0.3));
-            const bh = Math.min(h - by, lineH);
+        for (let i = 0; i < numMutations; i++) {
+            const word = shuffled[i];
+            if (!word) continue;
 
-            if (bw < 20 || bh < 8) continue;
+            const roll = Math.random();
+            if (roll < 0.38) {
+                // Ascending inverted floating echo ('make' -> inverted above)
+                applyFloatingMirroredEcho(word, w, h, intensity / 100);
+            } else if (roll < 0.72) {
+                // Descending stair-step cascade ('Forgets' -> 'gets' descending)
+                applyForgetsTextCascade(word, w, h, intensity / 100);
+            } else {
+                // In-place glyph corruption / horizontal character mirror
+                applyInPlaceGlyphCorruption(word, w, h);
+            }
+        }
+    }
+
+    // --- BAND-LEVEL POSTER MELT (Pure Glyph Band Distortions — Zero Wallpaper Boxes) ---
+    function applyPosterBandMelt(w, h, now) {
+        if (!detectedWordEntities.length) return;
+
+        // Pick 1-2 words and apply pure glyph reflection/overlay
+        const numWords = Math.min(detectedWordEntities.length, 1 + (Math.random() < 0.35 ? 1 : 0));
+        for (let i = 0; i < numWords; i++) {
+            const word = detectedWordEntities[Math.floor(Math.random() * detectedWordEntities.length)];
+            if (!word || !word.glyphCanvas) continue;
 
             const mode = Math.random();
-            try {
-                if (mode < 0.38) {
-                    // VERTICAL FLIP OVERLAY — the whole text line is flipped upside-down
-                    // and overlaid at partial opacity ("MISSING" inverted effect)
-                    ctx.save();
-                    ctx.globalAlpha = 0.60 + Math.random() * 0.28;
-                    ctx.translate(bx, by + bh);
-                    ctx.scale(1, -1);
-                    ctx.drawImage(glitchCanvas, bx, by, bw, bh, 0, 0, bw, bh);
-                    ctx.restore();
-                    // Faint second ghost shifted down
-                    ctx.save();
-                    ctx.globalAlpha = 0.22;
-                    ctx.translate(bx, by + bh + 6);
-                    ctx.scale(1, -1);
-                    ctx.drawImage(glitchCanvas, bx, by, bw, bh, 0, 0, bw, bh);
-                    ctx.restore();
-
-                } else if (mode < 0.68) {
-                    // HORIZONTAL MIRROR GHOST — text mirrored left-right and overlaid
-                    // creates the "letters appear backwards" name-plate effect
-                    ctx.save();
-                    ctx.globalAlpha = 0.65 + Math.random() * 0.25;
-                    ctx.translate(bx + bw, by);
-                    ctx.scale(-1, 1);
-                    ctx.drawImage(glitchCanvas, bx, by, bw, bh, 0, 0, bw, bh);
-                    ctx.restore();
-                    // Ghost of original slightly offset
-                    ctx.save();
-                    ctx.globalAlpha = 0.28;
-                    ctx.drawImage(glitchCanvas, bx, by, bw, bh, bx + 4, by + 2, bw, bh);
-                    ctx.restore();
-
-                } else {
-                    // WAX COLUMN DRIP — organic drip curves instead of square box clips
-                    const sliceH = Math.max(3, Math.floor(bh * 0.22));
-                    const srcSliceY = by + bh - sliceH;
-                    const dripH = Math.floor(16 + Math.random() * 32);
-
-                    ctx.save();
-                    // Create an organic rounded drip mask path
-                    ctx.beginPath();
-                    ctx.moveTo(bx, srcSliceY);
-                    const cols = 5;
-                    const colW = bw / cols;
-                    for (let c = 0; c < cols; c++) {
-                        const cx1 = bx + c * colW + colW * 0.5;
-                        const cy1 = srcSliceY + dripH + (Math.random() - 0.3) * 15;
-                        const cx2 = bx + (c + 1) * colW;
-                        const cy2 = srcSliceY;
-                        ctx.quadraticCurveTo(cx1, cy1, cx2, cy2);
-                    }
-                    ctx.lineTo(bx + bw, srcSliceY + dripH + 20);
-                    ctx.lineTo(bx, srcSliceY + dripH + 20);
-                    ctx.closePath();
-                    ctx.clip();
-
-                    // Draw the bottom slice of the text stretched downward into drip drops
-                    for (let step = 0; step < 4; step++) {
-                        const alpha = 0.55 - step * 0.12;
-                        const offsetY = step * Math.floor(dripH / 4);
-                        const stretchScale = 1.0 + step * 0.45;
-                        ctx.globalAlpha = Math.max(0, alpha);
-                        ctx.drawImage(
-                            glitchCanvas,
-                            bx, srcSliceY, bw, sliceH,
-                            bx + (Math.random() - 0.5) * 4,
-                            srcSliceY + offsetY,
-                            bw, Math.ceil(sliceH * stretchScale)
-                        );
-                    }
-                    ctx.restore();
-                }
-            } catch (e) {}
+            ctx.save();
+            if (mode < 0.5) {
+                // Pure glyph horizontal mirror ghost
+                ctx.globalAlpha = 0.65 + Math.random() * 0.25;
+                ctx.translate(word.x + word.w, word.y);
+                ctx.scale(-1, 1);
+                ctx.drawImage(word.glyphCanvas, 0, 0);
+            } else {
+                // Pure glyph vertical flip overlay
+                ctx.globalAlpha = 0.60 + Math.random() * 0.25;
+                ctx.translate(word.x, word.y + word.h);
+                ctx.scale(1, -1);
+                ctx.drawImage(word.glyphCanvas, 0, 0);
+            }
+            ctx.restore();
         }
     }
 
@@ -2743,52 +2828,21 @@ document.addEventListener('DOMContentLoaded', () => {
             const flawedMirrorVal = getSliderValue(flawedMirroringSlider, 80);
             const chromaticPx = getSliderValue(chromaticAberrationSlider, 28);
 
-            // Entity Memory Model: scan image for salient features
+            // Entity Memory Model & Pure Glyph Word Segmentation
             initializeMemoryEntities(w, h);
-            scanForTextCandidates(w, h);
+            scanForWordsAndGlyphs(w, h);
 
-            if (textCandidateBlocks.length > 0) {
-                const numDuplications = 2 + Math.floor(Math.random() * 3);
-                for (let d = 0; d < numDuplications; d++) {
-                    const block = textCandidateBlocks[Math.floor(Math.random() * textCandidateBlocks.length)];
-                    if (!block) continue;
-
-                    const featureW = Math.min(w - block.x, Math.max(32, block.w * 2.5));
-                    const featureH = Math.min(h - block.y, Math.max(28, block.h * 2.5));
-                    const fx = Math.max(0, block.x - Math.floor(block.w * 0.4));
-                    const fy = Math.max(0, block.y - Math.floor(block.h * 0.4));
-                    const dx = fx + (12 + Math.random() * 35);
-                    const dy = fy + (15 + Math.random() * 40);
-                    const angle = (Math.random() - 0.5) * 0.25;
-
-                    const offCanvas = document.createElement('canvas');
-                    offCanvas.width = featureW;
-                    offCanvas.height = featureH;
-                    const offCtx = offCanvas.getContext('2d');
-                    offCtx.drawImage(glitchCanvas, fx, fy, featureW, featureH, 0, 0, featureW, featureH);
-
-                    offCtx.globalCompositeOperation = 'destination-in';
-                    const grad = offCtx.createRadialGradient(
-                        featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.15,
-                        featureW / 2, featureH / 2, Math.min(featureW, featureH) * 0.5
-                    );
-                    grad.addColorStop(0, 'rgba(0,0,0,1)');
-                    grad.addColorStop(0.7, 'rgba(0,0,0,0.85)');
-                    grad.addColorStop(1, 'rgba(0,0,0,0)');
-                    offCtx.fillStyle = grad;
-                    offCtx.fillRect(0, 0, featureW, featureH);
-
-                    ctx.save();
-                    ctx.translate(dx + featureW / 2, dy + featureH / 2);
-                    ctx.rotate(angle);
-                    ctx.globalAlpha = 0.85;
-                    ctx.drawImage(offCanvas, -featureW / 2, -featureH / 2);
-                    ctx.restore();
-                }
+            if (toggleMisrememberedText && toggleMisrememberedText.checked && detectedWordEntities.length > 0) {
+                // Apply authentic Kane Pixels "Forgets" & Still Life text distortion (floating echo, cascade, glyph flips)
+                applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
+            } else if (memoryEntities.length > 0) {
+                // Non-text environment image: apply 1-2 discrete entity memory drifts over untouched background
+                triggerEntityDecayCycle();
+                renderMemoryEntities(ctx, performance.now());
             }
 
-            if (toggleMisrememberedText && toggleMisrememberedText.checked) {
-                applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
+            if (flawedMirrorVal > 0 && Math.random() < 0.35) {
+                applyFlawedInPlaceMirroring(w, h, flawedMirrorVal, performance.now());
             }
 
             // 7. Enable Snapshot and Preview Downloads
