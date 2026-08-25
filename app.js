@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.5.0';
+const APP_VERSION = 'v2.5.1';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1435,291 +1435,22 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) {
             console.error('[WORD SCAN ERROR]', e);
         }
-
-        // 3. Optional In-Browser AI OCR Pass (Tesseract.js)
-        if (typeof Tesseract !== 'undefined' && Tesseract.recognize && !isAiOcrRunning) {
-            isAiOcrRunning = true;
-            Tesseract.recognize(glitchCanvas, 'eng', { logger: () => {} })
-                .then(({ data }) => {
-                    isAiOcrRunning = false;
-                    if (data && data.words && data.words.length > 0) {
-                        console.log(`%c[AI OCR SUCCESS] Recognized ${data.words.length} semantic words`, 'color: #00ff66; font-weight: bold;');
-                        addLog(`[AI OCR ENGINE] Recognized ${data.words.length} semantic words via neural OCR`, 'alert');
-                        
-                        for (const ocrW of data.words) {
-                            const match = detectedWordEntities.find(wrd => 
-                                Math.abs(wrd.x - ocrW.bbox.x0) < 35 && Math.abs(wrd.y - ocrW.bbox.y0) < 30
-                            );
-                            if (match) {
-                                match.originalText = ocrW.text;
-                                match.confidence = ocrW.confidence;
-                            }
-                        }
-                    }
-                })
-                .catch(err => {
-                    isAiOcrRunning = false;
-                    console.warn('[AI OCR NOTICE] Running algorithmic fallback:', err);
-                });
-        }
     }
 
     function scanForTextCandidates(w, h) {
         scanForWordsAndGlyphs(w, h);
     }
 
-    // ─── CORE SYSTEM: ENTITY MEMORY MODEL (Per-Entity Drift, Duplication, Rotation, & Erasure) ───
-    let memoryEntities = [];
     let globalDecayLevel = 0;
     let _wakeLock = null; // Screen Wake Lock handle (keeps mobile screen on during processing)
 
-    function scanForObjectCandidates(w, h) {
-        // Larger, lower-frequency block sizes for furniture, hardware, wall fixtures, speakers
-        const blockSizes = [
-            { w: 64, h: 50 },
-            { w: 96, h: 72 },
-            { w: 128, h: 96 }
-        ];
-
-        const candidates = [];
-        try {
-            const imgData = ctx.getImageData(0, 0, w, h);
-            const data = imgData.data;
-            const lum = (idx) => 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-
-            for (const bs of blockSizes) {
-                // Dense 3x3 step grid — catches contrast at any interior point
-                const stepY = Math.max(12, Math.floor(bs.h * 0.4));
-                const stepX = Math.max(12, Math.floor(bs.w * 0.4));
-                for (let by = 0; by < h - bs.h; by += stepY) {
-                    for (let bx = 0; bx < w - bs.w; bx += stepX) {
-                        // Sample a 3x3 grid within the block (9 points)
-                        const hw = bs.w >> 1, hh = bs.h >> 1;
-                        const pts = [
-                            (by * w + bx) * 4,
-                            (by * w + bx + hw) * 4,
-                            (by * w + bx + bs.w - 1) * 4,
-                            ((by + hh) * w + bx) * 4,
-                            ((by + hh) * w + bx + hw) * 4,
-                            ((by + hh) * w + bx + bs.w - 1) * 4,
-                            ((by + bs.h - 1) * w + bx) * 4,
-                            ((by + bs.h - 1) * w + bx + hw) * 4,
-                            ((by + bs.h - 1) * w + bx + bs.w - 1) * 4
-                        ];
-                        const lums = pts.map(lum);
-                        const mn = Math.min(...lums), mx = Math.max(...lums);
-
-                        // Lowered threshold: 8 instead of 20 — captures subtle gradients in dim scenes
-                        if (mx - mn > 8) {
-                            candidates.push({ x: bx, y: by, w: bs.w, h: bs.h, contrast: mx - mn });
-                        }
-                    }
-                }
-            }
-        } catch (e) {}
-
-        candidates.sort((a, b) => b.contrast - a.contrast);
-        if (candidates.length > 30) candidates.length = 30;
-        return candidates;
-    }
-
-    function initializeMemoryEntities(w, h) {
-        memoryEntities = [];
-        insertedEntities = [];
-        globalDecayLevel = 0;
-
-        if (w <= 0 || h <= 0) return;
-
-        scanForTextCandidates(w, h);
-        const objectCandidates = scanForObjectCandidates(w, h);
-
-        // 1. Text & High-Contrast Features (up to 8)
-        for (let i = 0; i < Math.min(8, textCandidateBlocks.length); i++) {
-            const b = textCandidateBlocks[i];
-            createMemoryEntity('text', b.x, b.y, b.w, b.h, w, h);
-        }
-
-        // 2. Hardware / Fixtures / Furniture (up to 6)
-        for (let i = 0; i < Math.min(6, objectCandidates.length); i++) {
-            const b = objectCandidates[i];
-            const type = (i % 2 === 0) ? 'hardware' : 'object';
-            createMemoryEntity(type, b.x, b.y, b.w, b.h, w, h);
-        }
-
-        // 3. FALLBACK: if the scene is very dark/uniform and contrast scan found nothing,
-        //    seed at least 6 random-positioned entities so the system always has something to decay.
-        //    These are seeded from real canvas pixels at those positions.
-        if (memoryEntities.length === 0) {
-            addLog('[ENTITY MEMORY ENGINE] Low-contrast scene — seeding fallback entities from random regions', 'normal');
-            const fallbackTypes = ['text', 'hardware', 'object', 'hardware', 'text', 'object'];
-            for (let f = 0; f < 6; f++) {
-                const fw = 80 + Math.floor(Math.random() * 100);
-                const fh = 60 + Math.floor(Math.random() * 80);
-                const fx = Math.floor(Math.random() * Math.max(1, w - fw));
-                const fy = Math.floor(Math.random() * Math.max(1, h - fh));
-                createMemoryEntity(fallbackTypes[f], fx, fy, fw, fh, w, h);
-            }
-        }
-
-        addLog(`[ENTITY MEMORY ENGINE] Salience detection complete: ${memoryEntities.length} tracked entities`, 'alert');
-    }
-
-    function createMemoryEntity(type, x, y, w, h, canvasW, canvasH) {
-        const rx = Math.max(0, Math.min(canvasW - 10, x));
-        const ry = Math.max(0, Math.min(canvasH - 10, y));
-        const rw = Math.min(canvasW - rx, Math.max(10, w));
-        const rh = Math.min(canvasH - ry, Math.max(10, h));
-
-        let sourceCanvas;
-        if (type === 'text') {
-            // Pure glyph extraction with transparent background (zero wallpaper boxes)
-            sourceCanvas = extractPureGlyphCanvas(rx, ry, rw, rh);
-        } else {
-            // Radial elliptical soft feathering for hardware / fixtures / furniture
-            sourceCanvas = document.createElement('canvas');
-            sourceCanvas.width = rw;
-            sourceCanvas.height = rh;
-            const sCtx = sourceCanvas.getContext('2d');
-            try {
-                sCtx.drawImage(glitchCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
-                sCtx.globalCompositeOperation = 'destination-in';
-                const grad = sCtx.createRadialGradient(
-                    rw / 2, rh / 2, Math.min(rw, rh) * 0.15,
-                    rw / 2, rh / 2, Math.min(rw, rh) * 0.50
-                );
-                grad.addColorStop(0, 'rgba(0,0,0,1)');
-                grad.addColorStop(0.7, 'rgba(0,0,0,0.85)');
-                grad.addColorStop(1, 'rgba(0,0,0,0)');
-                sCtx.fillStyle = grad;
-                sCtx.fillRect(0, 0, rw, rh);
-            } catch(e) {}
-        }
-
-        memoryEntities.push({
-            id: 'entity_' + Math.random().toString(36).substr(2, 7),
-            type: type, // 'text' | 'object' | 'hardware'
-            baseRect: { x: rx, y: ry, w: rw, h: rh },
-            decayLevel: 0,
-            transform: {
-                mirrorX: false,
-                mirrorY: false,
-                rotation: 0,
-                duplicated: false,
-                dupOffset: { x: 0, y: 0 },
-                opacity: 1.0
-            },
-            sourceCanvas: sourceCanvas
-        });
-    }
-
     function triggerEntityDecayCycle() {
         globalDecayLevel++;
-        if (!memoryEntities.length) return;
-
-        const activeEntities = memoryEntities.filter(e => e.transform.opacity > 0);
-        if (!activeEntities.length) return;
-
-        // Pick 1-2 entities to mutate per repetition cycle using seeded RNG
-        const numMutations = 1 + (frameRng() < 0.4 ? 1 : 0);
-
-        for (let m = 0; m < numMutations; m++) {
-            const currentActive = memoryEntities.filter(e => e.transform.opacity > 0);
-            if (!currentActive.length) break;
-
-            // Prioritize text at low decay levels, hardware/objects at mid levels
-            currentActive.sort((a, b) => {
-                const order = { 'text': 1, 'hardware': 2, 'object': 3 };
-                return (order[a.type] || 3) - (order[b.type] || 3);
-            });
-
-            const targetIndex = Math.floor(frameRng() * Math.min(currentActive.length, 4));
-            const entity = currentActive[targetIndex];
-            if (!entity) continue;
-
-            entity.decayLevel++;
-            const dL = entity.decayLevel;
-
-            // 1. Low decay -> mirrorX or mirrorY flip
-            if (dL <= 2) {
-                if (frameRng() < 0.6) entity.transform.mirrorX = !entity.transform.mirrorX;
-                else entity.transform.mirrorY = !entity.transform.mirrorY;
-                addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) flipped (mirrorX:${entity.transform.mirrorX}, mirrorY:${entity.transform.mirrorY})`, 'alert');
-            }
-            // 2. Mid decay -> duplicated = true with spatial offset echo
-            else if (dL <= 4) {
-                entity.transform.duplicated = true;
-                entity.transform.dupOffset = {
-                    x: Math.round((frameRng() - 0.5) * 36),
-                    y: Math.round((frameRng() - 0.5) * 28)
-                };
-                addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) duplicated with echo offset (${entity.transform.dupOffset.x}px, ${entity.transform.dupOffset.y}px)`, 'alert');
-            }
-            // 3. Mid-high decay -> rotation tilt
-            else if (dL <= 6) {
-                const rotDelta = (frameRng() - 0.5) * 0.26;
-                entity.transform.rotation += rotDelta;
-                addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) rotated by ${(rotDelta * 180 / Math.PI).toFixed(1)}°`, 'alert');
-            }
-            // 4. High decay -> opacity ramps down to 0 for total erasure!
-            else {
-                entity.transform.opacity = Math.max(0, entity.transform.opacity - 0.4);
-                addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) fading to erasure (opacity: ${entity.transform.opacity.toFixed(2)})`, 'danger');
-            }
-        }
-
-        // Also mutate 1-2 detected word entities permanently during decay cycle
         if (detectedWordEntities.length > 0) {
             const unmutatedWords = detectedWordEntities.filter(wrd => !wrd.mutation);
             if (unmutatedWords.length > 0) {
                 const pickWord = unmutatedWords[Math.floor(frameRng() * unmutatedWords.length)];
                 mutateWordEntity(pickWord, glitchCanvas.width || 800, glitchCanvas.height || 600);
-            }
-        }
-    }
-
-    function renderMemoryEntities(ctx, now) {
-        if (!memoryEntities.length) return;
-
-        for (const e of memoryEntities) {
-            if (e.transform.opacity <= 0) continue; // Erased / fully forgotten
-
-            const { x, y, w, h } = e.baseRect;
-            const cx = x + w / 2;
-            const cy = y + h / 2;
-
-            ctx.save();
-            ctx.globalAlpha = e.transform.opacity;
-
-            ctx.translate(cx, cy);
-            if (e.transform.rotation !== 0) ctx.rotate(e.transform.rotation);
-            ctx.scale(e.transform.mirrorX ? -1 : 1, e.transform.mirrorY ? -1 : 1);
-            ctx.translate(-cx, -cy);
-
-            try {
-                ctx.drawImage(e.sourceCanvas, x, y, w, h);
-            } catch(err) {}
-
-            ctx.restore();
-
-            // Duplicated echo pass
-            if (e.transform.duplicated) {
-                ctx.save();
-                ctx.globalAlpha = e.transform.opacity * 0.55;
-                const ox = x + e.transform.dupOffset.x;
-                const oy = y + e.transform.dupOffset.y;
-                const dcx = ox + w / 2;
-                const dcy = oy + h / 2;
-
-                ctx.translate(dcx, dcy);
-                if (e.transform.rotation !== 0) ctx.rotate(e.transform.rotation);
-                ctx.scale(e.transform.mirrorX ? -1 : 1, e.transform.mirrorY ? -1 : 1);
-                ctx.translate(-dcx, -dcy);
-
-                try {
-                    ctx.drawImage(e.sourceCanvas, ox, oy, w, h);
-                } catch(err) {}
-
-                ctx.restore();
             }
         }
     }
@@ -2398,10 +2129,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // --- CORE SYSTEM: ENTITY MEMORY MODEL OVERLAY ---
-        // Layer tracked salient feature entities (text, hardware, fixtures) with compounding drift & erasure over untouched base
-        renderMemoryEntities(ctx, now);
-
         // --- PERIODIC DISTORTION WINDOW CHECK ---
         const chromaticPx = getSliderValue(chromaticAberrationSlider, 28);
         const pixelSliceFreq = getSliderValue(pixelSliceSlider, 75) / 100;
@@ -2450,9 +2177,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Zero Flickering, 100% Stable) ---
+        // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Kane Pixels 'Forgets' Engine) ---
         if (toggleMisrememberedText && toggleMisrememberedText.checked) {
-            if (now - lastTextScanTime > 2200 || detectedWordEntities.length === 0) {
+            if (now - lastTextScanTime > 500 || detectedWordEntities.length === 0) {
                 lastTextScanTime = now;
                 scanForWordsAndGlyphs(w, h);
             }
@@ -2762,8 +2489,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const flawedMirrorVal = getSliderValue(flawedMirroringSlider, 80);
             const chromaticPx = getSliderValue(chromaticAberrationSlider, 28);
 
-            // Entity Memory Model & Pure Glyph Word Segmentation
-            initializeMemoryEntities(w, h);
+            // Scan for words and extract pure glyphs
             scanForWordsAndGlyphs(w, h);
 
             if (toggleMisrememberedText && toggleMisrememberedText.checked && detectedWordEntities.length > 0) {
@@ -2774,10 +2500,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     mutateWordEntity(shuffled[i], w, h);
                 }
                 renderMisrememberedText(ctx, w, h);
-            } else if (memoryEntities.length > 0) {
-                // Non-text environment image: apply 1-2 discrete entity memory drifts over untouched background
-                triggerEntityDecayCycle();
-                renderMemoryEntities(ctx, performance.now());
             }
 
             if (flawedMirrorVal > 0 && Math.random() < 0.35) {
@@ -3232,8 +2954,6 @@ document.addEventListener('DOMContentLoaded', () => {
         outroFiredForThisPlay = false;
         textCandidateBlocks = [];
         lastTextScanTime = 0;
-        memoryEntities = [];
-        insertedEntities = [];
         globalDecayLevel = 0;
         _lastEntityDecayTime = 0;
 
@@ -3323,15 +3043,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         blitCtx.drawImage(sourceVideo, 0, 0, vw, vh);
                         ctx.drawImage(_videoBlitCanvas, 0, 0);
                     } catch(e) { try { ctx.drawImage(sourceVideo, 0, 0, vw, vh); } catch(e2) {} }
-                    // NOW the canvas has real pixels — scan for entities
-                    initializeMemoryEntities(vw, vh);
-                    // Also schedule a rescan 2s into playback (better pixel data, scene has changed)
-                    setTimeout(() => {
-                        if (mediaType === 'video' && memoryEntities.length < 4) {
-                            addLog('[ENTITY MEMORY ENGINE] Rescanning for entities with live frame data...', 'normal');
-                            initializeMemoryEntities(vw, vh);
-                        }
-                    }, 2000);
+                    scanForWordsAndGlyphs(vw, vh);
                 };
                 sourceVideo.addEventListener('seeked', firstFramePaint, { once: true });
 
@@ -3372,8 +3084,6 @@ document.addEventListener('DOMContentLoaded', () => {
             sourceAudio.addEventListener('loadedmetadata', () => {
                 distortionSchedule = generateDistortionSchedule(sourceAudio.duration || 10);
                 scheduleIndex = 0;
-                // Entity Memory Model: audio has no visual frame but initialize with display canvas dims
-                initializeMemoryEntities(glitchCanvas.width || 800, glitchCanvas.height || 400);
                 // Wake lock for audio processing
                 if ('wakeLock' in navigator) {
                     navigator.wakeLock.request('screen').then(wl => {
