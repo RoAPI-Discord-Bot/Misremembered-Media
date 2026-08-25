@@ -367,7 +367,7 @@ class KanePixelsAudioDSP:
         return np.column_stack((mono, mono)).astype(np.float32)
 
     @staticmethod
-    def process_full_audio(audio, sr=44100, seed=12345, sliders=None, fps=30.0, total_frames=0):
+    def process_full_audio(audio, sr=44100, seed=12345, sliders=None, fps=30.0, total_frames=0, emg_audio_f=None):
         if sliders is None:
             sliders = {}
         master_v = sliders.get("master_val", 85) / 100.0
@@ -410,26 +410,41 @@ class KanePixelsAudioDSP:
         if green_v > 0.10:
             mixed = KanePixelsAudioDSP.apply_green_light_audio_surge(mixed, sr=sr, duration_s=duration_s, intensity=green_v * master_v)
 
-        # 7. Inject No Signal jingle at each no_signal window (every 18s cycle at 13.5s mark)
+        # 7. Inject No Signal audio at each no_signal window (every 18s cycle at 13.5s mark)
+        # Uses real emg_audio_f (the emg.mp3 loaded by export thread) if available,
+        # otherwise falls back to the procedural synthesized jingle.
         if master_v > 0.30:
-            dbg("Injecting No Signal jingle audio at interrupt timestamps...", "AUDIO")
-            jingle_dur = 0.80
-            jingle_n = int(sr * jingle_dur)
-            jingle_audio = KanePixelsAudioDSP.synthesize_no_signal_jingle(jingle_n, sr=sr, gain=0.38 * master_v)
+            no_signal_dur = 0.80   # matches 13.5s–14.3s visual window
+            ns_n = int(sr * no_signal_dur)
+
+            if emg_audio_f is not None:
+                dbg("Injecting EMG audio at No Signal timestamps...", "AUDIO")
+                # Loop or trim the EMG audio to exactly ns_n samples
+                emg_src = emg_audio_f
+                if len(emg_src) < ns_n:
+                    reps = int(np.ceil(ns_n / len(emg_src)))
+                    emg_src = np.tile(emg_src, (reps, 1))[:ns_n]
+                else:
+                    emg_src = emg_src[:ns_n]
+                ns_audio = emg_src * (0.80 * master_v)
+            else:
+                dbg("Injecting synthesized No Signal jingle at interrupt timestamps...", "AUDIO")
+                ns_audio = KanePixelsAudioDSP.synthesize_no_signal_jingle(ns_n, sr=sr, gain=0.38 * master_v)
+
             cycle_time = 18.0
             t_sec = 0.0
             while t_sec < duration_s:
                 event_t = t_sec + 13.5
                 if event_t < duration_s:
                     idx0 = int(event_t * sr)
-                    idx1 = min(n_samples, idx0 + jingle_n)
+                    idx1 = min(n_samples, idx0 + ns_n)
                     seg_len = idx1 - idx0
                     if seg_len > 0:
                         fade_len = min(int(sr * 0.04), seg_len // 4)
                         env = np.ones(seg_len, dtype=np.float32)
                         env[:fade_len] = np.linspace(0, 1, fade_len)
                         env[-fade_len:] = np.linspace(1, 0, fade_len)
-                        mixed[idx0:idx1] += jingle_audio[:seg_len] * env[:, np.newaxis]
+                        mixed[idx0:idx1] += ns_audio[:seg_len] * env[:, np.newaxis]
                 t_sec += cycle_time
 
         # 8. Camcorder AGC & soft saturation limiter
@@ -439,6 +454,45 @@ class KanePixelsAudioDSP:
         out_int16 = np.clip(saturated * 32767.0, -32767.0, 32767.0).astype(np.int16)
         dbg(f"Audio DSP: Processing complete.", "AUDIO")
         return out_int16
+
+    @staticmethod
+    def load_emg_audio(emg_path, sr=44100, ffmpeg=None):
+        """
+        Decode emg.mp3 to a float32 stereo numpy array at 44100 Hz using FFmpeg.
+        Returns None if the file doesn't exist or decode fails.
+        """
+        if not emg_path or not os.path.exists(emg_path):
+            dbg(f"EMG audio file not found: {emg_path}", "AUDIO")
+            return None
+        if not ffmpeg or not os.path.exists(ffmpeg):
+            dbg("FFmpeg not available — cannot decode EMG MP3", "AUDIO")
+            return None
+        try:
+            tmp = os.path.join(tempfile.gettempdir(), f"_emg_decoded_{int(time.time())}.wav")
+            cmd = [ffmpeg, "-y", "-i", emg_path, "-vn", "-ac", "2", "-ar", str(sr), tmp]
+            subprocess.run(cmd, capture_output=True, timeout=30)
+            if not os.path.exists(tmp) or os.path.getsize(tmp) < 500:
+                dbg("EMG decode produced no output", "AUDIO")
+                return None
+            sr_out, raw = wavfile.read(tmp)
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            if raw.dtype == np.int16:
+                audio_f = raw.astype(np.float32) / 32768.0
+            elif raw.dtype == np.int32:
+                audio_f = raw.astype(np.float32) / 2147483648.0
+            else:
+                audio_f = raw.astype(np.float32)
+            if audio_f.ndim == 1:
+                audio_f = np.column_stack((audio_f, audio_f))
+            dbg(f"EMG audio loaded: {len(audio_f)/sr_out:.2f}s @ {sr_out}Hz stereo", "AUDIO")
+            return audio_f
+        except Exception as e:
+            dbg(f"EMG audio load failed: {e}", "ERROR")
+            return None
+
 
 
 
@@ -666,6 +720,216 @@ class LocalStillLifeEngine:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3b. BACKROOMS ENVIRONMENT OBJECT HALLUCINATOR
+# Detects large furniture/architectural objects in the scene and applies
+# backrooms-style distortion, removal, or replacement effects.
+# Works on any video — camera panning a room, walking through a hallway, etc.
+# Effects: perspective warp, erase-to-background, ghost duplication, phantom
+#          doorway/staircase insertion in walls.
+# ─────────────────────────────────────────────────────────────────────────────
+class LocalEnvironmentHallucinator:
+
+    # Aspect ratios and size bands that suggest furniture/architectural features:
+    # wide flat: tables, desks, shelves  (aspect 1.5–8, area 3–30% of frame)
+    # tall thin: bookshelves, doors, windows  (aspect 0.15–0.65, area 2–25%)
+    # squarish: chairs, monitors, boxes  (aspect 0.65–1.5, area 2–18%)
+    _OBJ_MIN_AREA_FRAC = 0.015   # 1.5% of frame minimum
+    _OBJ_MAX_AREA_FRAC = 0.40    # 40% max (anything larger is probably the wall itself)
+
+    @staticmethod
+    def _detect_objects(bgr_img, rng):
+        """
+        Returns a list of (x, y, w, h) bounding rects for furniture-scale objects
+        found via Canny edge detection + contour area filtering.
+        Skips very thin text-like regions (aspect > 10 or bh < 15px).
+        """
+        h, w = bgr_img.shape[:2]
+        frame_area = w * h
+        min_area = frame_area * LocalEnvironmentHallucinator._OBJ_MIN_AREA_FRAC
+        max_area = frame_area * LocalEnvironmentHallucinator._OBJ_MAX_AREA_FRAC
+
+        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (7, 7), 0)
+        edges = cv2.Canny(blur, 30, 90)
+        # Close gaps so furniture outlines form solid blobs
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (18, 18))
+        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        objects = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area or area > max_area:
+                continue
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            if bw < 20 or bh < 15:
+                continue
+            aspect = bw / float(bh)
+            if aspect > 12:   # skip text-like horizontal strips
+                continue
+            objects.append((bx, by, bw, bh))
+
+        # Shuffle so each frame applies to different objects
+        rng.shuffle(objects)
+        return objects[:6]   # process at most 6 objects per frame
+
+    @staticmethod
+    def _sample_background_patch(bgr_img, x, y, bw, bh, rng):
+        """Sample a background color patch from outside the object region."""
+        h, w = bgr_img.shape[:2]
+        # Try sampling from edges of the frame or adjacent region
+        sample_x = rng.randint(0, max(1, w - bw - 1)) if rng.random() < 0.5 else max(0, x - bw)
+        sample_y = rng.randint(0, max(1, h - bh - 1))
+        sx0, sy0 = max(0, sample_x), max(0, sample_y)
+        sx1, sy1 = min(w, sx0 + bw), min(h, sy0 + bh)
+        patch = bgr_img[sy0:sy1, sx0:sx1].copy()
+        if patch.shape[0] != bh or patch.shape[1] != bw:
+            patch = cv2.resize(patch, (bw, bh), interpolation=cv2.INTER_LINEAR)
+        return patch
+
+    @staticmethod
+    def _warp_perspective_object(patch, rng, intensity):
+        """
+        Apply a subtle perspective warp to a furniture patch — like a chair tilting
+        toward the viewer or a bookcase slightly angling away into a wrong dimension.
+        """
+        bh, bw = patch.shape[:2]
+        max_shift = int(min(bw, bh) * 0.18 * intensity)
+        if max_shift < 2:
+            return patch
+
+        src = np.float32([[0, 0], [bw, 0], [bw, bh], [0, bh]])
+        # Randomly perturb each corner slightly — stronger on one side than another
+        def jitter():
+            return [rng.randint(-max_shift, max_shift), rng.randint(-max_shift, max_shift)]
+
+        dst = np.float32([
+            [0 + rng.randint(0, max_shift),       jitter()[1]],
+            [bw - rng.randint(0, max_shift),      jitter()[1]],
+            [bw - rng.randint(0, max_shift // 2), bh - rng.randint(0, max_shift)],
+            [0  + rng.randint(0, max_shift // 2), bh - rng.randint(0, max_shift)],
+        ])
+        M = cv2.getPerspectiveTransform(src, dst)
+        return cv2.warpPerspective(patch, M, (bw, bh), borderMode=cv2.BORDER_REFLECT)
+
+    @staticmethod
+    def apply_environment_hallucination(bgr_img, rng, intensity=0.80):
+        """
+        Main entry point. Detects furniture-scale objects and applies a random
+        backrooms effect to each: distort, erase, ghost-duplicate, or phantom insert.
+        """
+        if intensity < 0.05:
+            return bgr_img
+
+        h, w = bgr_img.shape[:2]
+        objects = LocalEnvironmentHallucinator._detect_objects(bgr_img, rng)
+        if not objects:
+            return bgr_img
+
+        out = bgr_img.copy()
+        dbg(f"EnvHallucinator: found {len(objects)} objects to corrupt", "STILL")
+
+        for (bx, by, bw, bh) in objects:
+            # Skip if area is invalid
+            if bw < 4 or bh < 4:
+                continue
+            if by + bh > h or bx + bw > w:
+                continue
+
+            patch = out[by:by+bh, bx:bx+bw].copy()
+            if patch.size == 0:
+                continue
+
+            roll = rng.random()
+
+            # ── EFFECT A: PERSPECTIVE DISTORTION (chair tilts, shelf angles wrong) ──
+            if roll < 0.35:
+                warped = LocalEnvironmentHallucinator._warp_perspective_object(patch, rng, intensity)
+                # Blend warped back — not 100% so the ghosting shows through
+                blend = cv2.addWeighted(patch, 0.25, warped, 0.75, 0)
+                out[by:by+bh, bx:bx+bw] = blend
+                dbg(f"  → perspective warp at ({bx},{by}) {bw}x{bh}", "STILL")
+
+            # ── EFFECT B: ERASE/REMOVE (object vanishes, background fills in) ──
+            elif roll < 0.55:
+                bg_patch = LocalEnvironmentHallucinator._sample_background_patch(
+                    bgr_img, bx, by, bw, bh, rng
+                )
+                # Smear background color with slight noise so it doesn't look like copy-paste
+                noise = np.random.randint(-12, 12, bg_patch.shape, dtype=np.int16)
+                erased = np.clip(bg_patch.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+                # Feather the edges so it blends with surroundings
+                mask = np.zeros((bh, bw), dtype=np.float32)
+                pad = max(2, min(bh, bw) // 6)
+                mask[pad:-pad, pad:-pad] = 1.0
+                mask = cv2.GaussianBlur(mask, (pad * 2 + 1, pad * 2 + 1), 0)
+                for c in range(3):
+                    out[by:by+bh, bx:bx+bw, c] = (
+                        patch[:, :, c] * (1.0 - mask) + erased[:, :, c] * mask
+                    ).astype(np.uint8)
+                dbg(f"  → erase object at ({bx},{by}) {bw}x{bh}", "STILL")
+
+            # ── EFFECT C: GHOST DUPLICATE (copy of object appears shifted — backrooms doubling) ──
+            elif roll < 0.75:
+                # Shift the duplicate to an adjacent position
+                shift_x = rng.choice([-1, 1]) * rng.randint(int(bw * 0.15), int(bw * 0.60))
+                shift_y = rng.choice([-1, 1]) * rng.randint(5, max(6, int(bh * 0.25)))
+                gx0 = max(0, bx + shift_x)
+                gy0 = max(0, by + shift_y)
+                gx1 = min(w, gx0 + bw)
+                gy1 = min(h, gy0 + bh)
+                gw = gx1 - gx0
+                gh = gy1 - gy0
+                if gw > 10 and gh > 10:
+                    ghost_patch = cv2.resize(patch[:gh, :gw], (gw, gh))
+                    # Slightly desaturate and darken the ghost for uncanny doubling effect
+                    gray_ghost = cv2.cvtColor(ghost_patch, cv2.COLOR_BGR2GRAY)
+                    ghost_tinted = cv2.merge([
+                        (gray_ghost * 0.55).astype(np.uint8),
+                        (gray_ghost * 0.62).astype(np.uint8),
+                        (gray_ghost * 0.50).astype(np.uint8),
+                    ])
+                    ghost_alpha = 0.45 * intensity
+                    out[gy0:gy1, gx0:gx1] = cv2.addWeighted(
+                        out[gy0:gy1, gx0:gx1], 1.0 - ghost_alpha,
+                        ghost_tinted, ghost_alpha, 0
+                    )
+                dbg(f"  → ghost duplicate at ({bx},{by}) shifted ({shift_x},{shift_y})", "STILL")
+
+            # ── EFFECT D: PHANTOM DOORWAY / ARCHITECTURAL INSERT ──
+            # Cut a door/window shaped rectangle into an object, filled with a
+            # dark backrooms-adjacent corridor color — like a passage that shouldn't exist.
+            else:
+                door_w = max(8, int(bw * rng.uniform(0.25, 0.55)))
+                door_h = max(12, int(bh * rng.uniform(0.45, 0.85)))
+                door_x = bx + rng.randint(0, max(1, bw - door_w))
+                door_y = by + rng.randint(0, max(1, bh - door_h))
+                dx0, dy0 = max(0, door_x), max(0, door_y)
+                dx1, dy1 = min(w, dx0 + door_w), min(h, dy0 + door_h)
+                if dx1 - dx0 > 4 and dy1 - dy0 > 4:
+                    # Sample average color of the image and darken it significantly
+                    mean_col = bgr_img[dy0:dy1, dx0:dx1].mean(axis=(0, 1))
+                    corridor_col = np.clip(mean_col * 0.20 + np.array([5, 8, 3]), 0, 40).astype(np.uint8)
+                    door_fill = np.full((dy1 - dy0, dx1 - dx0, 3), corridor_col, dtype=np.uint8)
+                    # Add subtle noise streaks to the corridor fill
+                    noise_streaks = np.random.randint(0, 8, door_fill.shape, dtype=np.uint8)
+                    door_fill = np.clip(door_fill.astype(np.int16) + noise_streaks, 0, 50).astype(np.uint8)
+                    # Feathered blend
+                    feather = np.ones((dy1 - dy0, dx1 - dx0), dtype=np.float32) * intensity * 0.85
+                    pad = max(1, min(dy1 - dy0, dx1 - dx0) // 8)
+                    feather[:pad, :] = np.linspace(0, 1, pad)[:, np.newaxis]
+                    feather[-pad:, :] = np.linspace(1, 0, pad)[:, np.newaxis]
+                    for c in range(3):
+                        out[dy0:dy1, dx0:dx1, c] = (
+                            out[dy0:dy1, dx0:dx1, c].astype(np.float32) * (1.0 - feather) +
+                            door_fill[:, :, c].astype(np.float32) * feather
+                        ).clip(0, 255).astype(np.uint8)
+                dbg(f"  → phantom doorway in object at ({bx},{by})", "STILL")
+
+        return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4. MASTER COMPOSITE ENGINE
 # Green Light time pause + electric cracks, visual interrupts, and Forgets corruption
 # ─────────────────────────────────────────────────────────────────────────────
@@ -869,10 +1133,20 @@ class MisrememberedEngine:
 
         out = frame.copy()
 
-        # ── 3. STILL LIFE ANATOMICAL RECONSTRUCTION ──
+        # ── 3. STILL LIFE ANATOMICAL RECONSTRUCTION (person) ──
         if self.use_still_life and still_v > 0.05:
             out = LocalStillLifeEngine.apply_still_life_reconstruction(
                 out, rng, intensity=still_v * master_v, gloss=gloss_v
+            )
+
+        # ── 3b. BACKROOMS ENVIRONMENT OBJECT HALLUCINATION ──
+        # Detects furniture/architecture in any frame (chairs, bookshelves, tables,
+        # walls) and applies backrooms-style effects: warp, erase, ghost-double,
+        # or phantom doorway. Runs independently of person detection — works on
+        # camera-panning room footage where no person is present.
+        if still_v > 0.05:
+            out = LocalEnvironmentHallucinator.apply_environment_hallucination(
+                out, rng, intensity=still_v * master_v * 0.90
             )
 
         # ── 4. KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE ──
@@ -1289,9 +1563,24 @@ class MisrememberedDesktopApp(ctk.CTk):
 
             # ── AUDIO PROCESSING WITH KANE PIXELS DSP ──
             if FFMPEG:
-                self.add_log("Processing Backrooms audio DSP (tape wow, liminal reverb, fluorescent hum, ambient drone, jingle)...", "info")
+                self.add_log("Processing Backrooms audio DSP (tape wow, liminal reverb, fluorescent hum, ambient drone, EMG)...", "info")
                 ext_cmd = [FFMPEG, "-y", "-i", in_path, "-vn", "-ac", "2", "-ar", "44100", temp_in_wav]
                 subprocess.run(ext_cmd, capture_output=True, timeout=60)
+
+                # Load EMG audio for No Signal injection — sits alongside the source video/app
+                emg_candidates = [
+                    os.path.join(os.path.dirname(in_path), "emg.mp3"),
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "emg.mp3"),
+                    r"C:\Users\rucki\Downloads\Miscellaneous\Misremembered_Media\emg.mp3",
+                ]
+                emg_audio_f = None
+                for emg_path in emg_candidates:
+                    emg_audio_f = KanePixelsAudioDSP.load_emg_audio(emg_path, sr=44100, ffmpeg=FFMPEG)
+                    if emg_audio_f is not None:
+                        self.add_log(f"EMG audio loaded for No Signal: {os.path.basename(emg_path)}", "info")
+                        break
+                if emg_audio_f is None:
+                    self.add_log("EMG audio not found — using procedural No Signal jingle", "warn")
 
                 has_audio = os.path.exists(temp_in_wav) and os.path.getsize(temp_in_wav) > 1000
 
@@ -1300,7 +1589,8 @@ class MisrememberedDesktopApp(ctk.CTk):
                         sr, raw_audio = wavfile.read(temp_in_wav)
                         proc_audio = KanePixelsAudioDSP.process_full_audio(
                             raw_audio, sr=sr, seed=seed, sliders=sliders,
-                            fps=fps, total_frames=total_frames
+                            fps=fps, total_frames=total_frames,
+                            emg_audio_f=emg_audio_f
                         )
                         wavfile.write(temp_out_wav, sr, proc_audio)
                     except Exception as e:
