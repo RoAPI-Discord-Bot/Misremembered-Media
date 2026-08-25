@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.6.1';
+const APP_VERSION = 'v2.6.2';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1539,38 +1539,38 @@ document.addEventListener('DOMContentLoaded', () => {
         return _faceFeatherCtx;
     }
 
-    // Draws a soft-feathered slice with zero hard box seams
-    function drawFeatheredSlice(targetCtx, srcCanvas, sx, sy, sw, sh, dx, dy, opacity) {
+    // Draws a solid, real duplicated feature with seamless border edge feathering (0% ghosting, 100% solid real copy)
+    function drawFeatheredSlice(targetCtx, srcCanvas, sx, sy, sw, sh, dx, dy, opacity = 1.0) {
         if (sw <= 0 || sh <= 0 || opacity <= 0) return;
         const fCtx = getFaceFeatherCtx(sw, sh);
         fCtx.clearRect(0, 0, sw, sh);
 
-        // 1. Copy slice
+        // 1. Copy source slice
         fCtx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
 
-        // 2. Feather perimeter edges with radial gradient mask
+        // 2. Feather ONLY the outer perimeter (outer 15%) so the interior is 100% SOLID & OPAQUE
         fCtx.globalCompositeOperation = 'destination-in';
         const grad = fCtx.createRadialGradient(
-            sw / 2, sh / 2, Math.min(sw, sh) * 0.18,
-            sw / 2, sh / 2, Math.min(sw, sh) * 0.48
+            sw / 2, sh / 2, Math.min(sw, sh) * 0.35,
+            sw / 2, sh / 2, Math.min(sw, sh) * 0.50
         );
         grad.addColorStop(0, 'rgba(0,0,0,1)');
-        grad.addColorStop(0.65, 'rgba(0,0,0,0.85)');
-        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        grad.addColorStop(0.85, 'rgba(0,0,0,1)'); // Solid 100% core
+        grad.addColorStop(1, 'rgba(0,0,0,0)');    // Soft outer boundary
         fCtx.fillStyle = grad;
         fCtx.fillRect(0, 0, sw, sh);
         fCtx.globalCompositeOperation = 'source-over';
 
-        // 3. Draw smoothly onto main canvas
+        // 3. Draw onto target canvas with 100% solid opacity (looks like a real duplicate, not a ghost!)
         targetCtx.save();
-        targetCtx.globalAlpha = opacity;
+        targetCtx.globalAlpha = Math.min(1.0, opacity);
         targetCtx.drawImage(_faceFeatherCanvas, 0, 0, sw, sh, dx, dy, sw, sh);
         targetCtx.restore();
     }
 
-    // Renders all persistent word mutations at fixed, rock-solid coordinates (Zero Flickering!)
-    function renderMisrememberedText(ctx, canvasW, canvasH, intensity = 1.0) {
-        if (!detectedWordEntities.length || intensity <= 0.05) return;
+    // Renders all persistent word mutations with 100% CONSTANT, rock-solid coordinates (Zero Pulsing, Zero Flickering!)
+    function renderMisrememberedText(ctx, canvasW, canvasH) {
+        if (!detectedWordEntities.length) return;
 
         // Ensure at least 50% of words have active mutations
         const mutated = detectedWordEntities.filter(w => w.mutation && w.glyphCanvas);
@@ -1599,7 +1599,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const m = word.mutation;
             if (m.type === 'floating_echo') {
                 ctx.save();
-                ctx.globalAlpha = 0.95 * intensity;
+                ctx.globalAlpha = 1.0; // 100% Constant Solid Clarity
                 ctx.translate(m.destX + word.w / 2, m.destY + word.h / 2);
                 ctx.scale(-1, -1);
                 ctx.drawImage(word.glyphCanvas, -word.w / 2, -word.h / 2);
@@ -1609,7 +1609,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const destX = word.x + m.stepDx * s;
                     const destY = word.y + m.stepDy * s;
                     if (destX + word.w > canvasW || destY + word.h > canvasH) continue;
-                    const alpha = Math.max(0.30, (0.95 - s * 0.18) * intensity);
+                    const alpha = Math.max(0.65, 1.0 - (s - 1) * 0.15); // Solid crisp cascading steps
                     ctx.save();
                     ctx.globalAlpha = alpha;
                     const trimX = Math.min(word.w * 0.6, (s - 1) * (word.w / m.numSteps) * 0.6);
@@ -1622,7 +1622,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else if (m.type === 'glyph_flip') {
                 ctx.save();
-                ctx.globalAlpha = 0.95 * intensity;
+                ctx.globalAlpha = 1.0; // 100% Constant Solid Clarity
                 ctx.translate(word.x + m.charOffset + m.charW, word.y);
                 ctx.scale(-1, 1);
                 ctx.drawImage(word.glyphCanvas, m.charOffset, 0, m.charW, word.h, 0, 0, m.charW, word.h);
@@ -1632,7 +1632,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.restore();
     }
 
-    // Kane Pixels authentic facial & subject misremembering (Angled Duplication & Soft Feathering)
+    // Kane Pixels authentic solid facial & subject duplication (real physical copies, not translucent ghosts)
     function applyFaceAndSubjectDistortion(w, h, intensity = 1.0) {
         if (!toggleObjectMelt || !toggleObjectMelt.checked || intensity <= 0.05) return;
 
@@ -1643,50 +1643,39 @@ document.addEventListener('DOMContentLoaded', () => {
             const faceW = Math.round(w * 0.44);
             const faceH = Math.round(h * 0.58);
 
-            // 1. Asymmetrical Upper Feature / Eye Drift
+            // 1. Asymmetrical Upper Feature / Eye Drift (solid extra eye/brow shifted upward)
             const eyeH = Math.round(faceH * 0.42);
-            const eyeShiftY = -Math.round(h * 0.035 * intensity);
-            const eyeShiftX = Math.round(w * 0.015 * intensity);
+            const eyeShiftY = -Math.round(h * 0.038);
+            const eyeShiftX = Math.round(w * 0.018);
             drawFeatheredSlice(
                 ctx, glitchCanvas,
                 faceX, faceY, faceW, eyeH,
                 faceX + eyeShiftX, faceY + eyeShiftY,
-                0.72 * intensity
+                1.0 // 100% SOLID REAL COPY
             );
 
-            // 2. Angled Lower Feature Duplicate (Nose / Mouth displaced downwards at an angle)
+            // 2. Angled Lower Feature Duplicate (solid real nose/mouth duplicated downwards at an angle)
             const noseY = faceY + Math.round(faceH * 0.35);
             const noseH = Math.round(faceH * 0.48);
-            const noseAngleDx = Math.round(w * 0.038 * intensity);
-            const noseAngleDy = Math.round(h * 0.048 * intensity);
+            const noseAngleDx = Math.round(w * 0.040);
+            const noseAngleDy = Math.round(h * 0.050);
 
-            // Primary angled duplicate
             drawFeatheredSlice(
                 ctx, glitchCanvas,
                 faceX, noseY, faceW, noseH,
                 faceX + noseAngleDx, noseY + noseAngleDy,
-                0.78 * intensity
+                1.0 // 100% SOLID REAL COPY
             );
 
-            // Secondary trailing ghost duplicate (at higher intensity)
-            if (intensity > 0.45) {
-                drawFeatheredSlice(
-                    ctx, glitchCanvas,
-                    faceX, noseY, faceW, noseH,
-                    faceX + Math.round(noseAngleDx * 1.7), noseY + Math.round(noseAngleDy * 1.7),
-                    0.42 * intensity
-                );
-            }
-
-            // 3. Left half face ghost displacement
+            // 3. Left half face solid offset
             const halfW = Math.round(faceW * 0.52);
-            const halfDx = -Math.round(w * 0.025 * intensity);
-            const halfDy = -Math.round(h * 0.028 * intensity);
+            const halfDx = -Math.round(w * 0.028);
+            const halfDy = -Math.round(h * 0.030);
             drawFeatheredSlice(
                 ctx, glitchCanvas,
                 faceX, faceY, halfW, faceH,
                 faceX + halfDx, faceY + halfDy,
-                0.55 * intensity
+                1.0 // 100% SOLID REAL COPY
             );
         } catch (e) {
             console.warn('[FACE DISTORTION ERROR]', e);
@@ -2333,13 +2322,13 @@ document.addEventListener('DOMContentLoaded', () => {
             applyFaceAndSubjectDistortion(w, h, uncannyIntensity);
         }
 
-        // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Kane Pixels 'Forgets' Engine) ---
-        if (toggleMisrememberedText && toggleMisrememberedText.checked && uncannyIntensity > 0.04) {
+        // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Kane Pixels 'Forgets' Engine - Constant, Solid) ---
+        if (toggleMisrememberedText && toggleMisrememberedText.checked) {
             if (now - lastTextScanTime > 150 || detectedWordEntities.length === 0) {
                 lastTextScanTime = now;
                 scanForWordsAndGlyphs(w, h);
             }
-            renderMisrememberedText(ctx, w, h, uncannyIntensity);
+            renderMisrememberedText(ctx, w, h);
         }
 
 
