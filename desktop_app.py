@@ -43,7 +43,12 @@ def dbg(msg, tag="INFO"):
             pass
 
 def _launch_debug_terminal():
-    """Open a separate PowerShell window that live-tails the debug log."""
+    """Open a separate PowerShell window only if not already running in an interactive terminal."""
+    # If already running inside an interactive PowerShell / CMD prompt, don't spawn a second console!
+    if sys.stdout and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+        dbg("Running in interactive terminal — live logs stream directly to current console.", "INIT")
+        return
+
     try:
         with open(_DEBUG_LOG, "w", encoding="utf-8") as _f:
             _f.write(f"=== MISREMEMBERED MEDIA {APP_VERSION} LIVE DEBUG ===\n")
@@ -332,15 +337,34 @@ class KanePixelsAudioDSP:
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. KANE PIXELS "FORGETS / STILL LIFE" TEXT CORRUPTOR
 # Full implementation of the 5 authentic Kane Pixels text corruption modes:
-# - Inpainted box & phonetic duplicate overlay (Ref 1)
+# - Inpainted box & multi-language / phonetic duplicate overlay (Ref 1)
 # - Vertical barcode smear / dripping lines (Ref 5)
 # - In-place razor glyph serration (Ref 3)
 # - Horizontal bisect & inverted mirror fold (Ref 4)
 # - Angled ghost trailing & offset layers (Ref 2)
 # ─────────────────────────────────────────────────────────────────────────────
+INTERNATIONAL_PHRASES = [
+    # Japanese
+    "記憶の喪失", "立ち入り禁止", "存在しない部屋", "忘れた名前", "警告",
+    # Russian
+    "ПАМЯТЬ СТЕРТА", "НЕ СМОТРИ НАЗАД", "ВЫХОДА НЕТ", "ОШИБКА СВЯЗИ", "ОСТАНОВИСЬ",
+    # French
+    "SOUVENIR PERDU", "NE REGARDE PAS", "AUCUN SIGNAL", "OUBLIE-MOI", "ZONE INTERDITE",
+    # German
+    "VERLORENE ERINNERUNG", "KEIN ZURÜCK", "SYSTEM FEHLER", "NICHT ANFASSEN",
+    # Spanish
+    "MEMORIA PERDIDA", "NO MIRES", "SIN SALIDA", "REGISTRO BORRADO",
+    # Romanian / Latin / Greek
+    "FĂRĂ SEMNAL", "ΔΕＮ ΥΠΑΡΧΕΙ", "MEMORIA DAMNATA", "NON RESPIRARE"
+]
+
 class LocalGlyphCorruptor:
     @staticmethod
     def generate_phonetic_mutation(word_len, rng):
+        # 35% chance to output an authentic international anomaly phrase
+        if rng.random() < 0.35:
+            return rng.choice(INTERNATIONAL_PHRASES)
+
         vowels = ['a', 'e', 'i', 'o', 'u', 'ea', 'oe', 'ai']
         consonants = ['b', 'c', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'v', 'w', 'sh', 'th', 'ch', 'bl', 'st', 'cl']
         res = []
@@ -359,14 +383,16 @@ class LocalGlyphCorruptor:
         h, w = bgr_img.shape[:2]
         gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
         
-        # Fast Sobel gradient text region detector
-        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-        grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (12, 3)))
+        # Fast 4x Accelerated Sobel Gradient on Half-Resolution
+        scale_factor = 2
+        gray_small = cv2.resize(gray, (w // scale_factor, h // scale_factor), interpolation=cv2.INTER_LINEAR)
+        grad_x = cv2.Sobel(gray_small, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray_small, cv2.CV_32F, 0, 1, ksize=3)
+        grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (8, 2)))
         grad_norm = cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
         _, thresh = cv2.threshold(grad_norm, 55, 255, cv2.THRESH_BINARY)
-        connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (16, 6)))
+        connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (10, 4)))
         contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         out = bgr_img.copy()
@@ -380,7 +406,9 @@ class LocalGlyphCorruptor:
             if corrupted_count >= max_corrupt:
                 break
 
-            x, y, bw, bh = cv2.boundingRect(cnt)
+            sx, sy, sbw, sbh = cv2.boundingRect(cnt)
+            # Scale coordinates back up to full resolution
+            x, y, bw, bh = sx * scale_factor, sy * scale_factor, sbw * scale_factor, sbh * scale_factor
             aspect = bw / float(max(1, bh))
             area = bw * bh
 
@@ -392,7 +420,6 @@ class LocalGlyphCorruptor:
                 is_white_bg = np.mean(roi) > 135
 
                 # ── COMPOUNDING KANE PIXELS "FORGETS / STILL LIFE" TEXT DISTORTION ──
-                # All reference effects compound, layer, and add together onto the text region:
                 patch = out[y:y+bh, x:x+bw].copy()
                 if patch.size == 0:
                     continue
@@ -400,11 +427,11 @@ class LocalGlyphCorruptor:
                 # 1. In-Place Razor Glyph Serration & Vertical Slicing (Ref 3)
                 if intensity > 0.20:
                     strip_w = max(2, int(bh * 0.16))
-                    for sx in range(0, bw, strip_w * 2):
-                        ex = min(bw, sx + strip_w)
+                    for sx_pos in range(0, bw, strip_w * 2):
+                        ex_pos = min(bw, sx_pos + strip_w)
                         shift = rng.choice([-1, 1]) * rng.randint(2, max(3, int(bh * 0.22)))
                         M = np.float32([[1, 0, 0], [0, 1, shift]])
-                        patch[:, sx:ex] = cv2.warpAffine(patch[:, sx:ex], M, (ex - sx, bh), borderMode=cv2.BORDER_REFLECT)
+                        patch[:, sx_pos:ex_pos] = cv2.warpAffine(patch[:, sx_pos:ex_pos], M, (ex_pos - sx_pos, bh), borderMode=cv2.BORDER_REFLECT)
                     out[y:y+bh, x:x+bw] = patch
 
                 # 2. Horizontal Bisect & Inversion Seam (Ref 4)
@@ -435,7 +462,7 @@ class LocalGlyphCorruptor:
                     if act_len > 0:
                         out[y+bh:y_end, x:x+bw] = cv2.addWeighted(out[y+bh:y_end, x:x+bw], 0.35, drip_block[:act_len, :], 0.65, 0)
 
-                # 5. Inpainted Box & Phonetic Mutation Overlays (Ref 1)
+                # 5. Inpainted Box & Phonetic / Multi-Language Overlays (Ref 1)
                 if intensity > 0.30 and rng.random() < 0.75:
                     bg_col = (255, 255, 255) if is_white_bg else (10, 10, 10)
                     fg_col = (10, 10, 10) if is_white_bg else (245, 245, 245)
@@ -444,15 +471,13 @@ class LocalGlyphCorruptor:
                     oy = y + rng.randint(-int(bh*0.12), int(bh*0.12))
                     draw.rectangle([ox, oy, ox + bw, oy + bh], fill=bg_col)
 
-                    est_words = max(1, bw // int(bh * 1.7))
-                    words = [LocalGlyphCorruptor.generate_phonetic_mutation(rng.randint(3, 7), rng) for _ in range(est_words)]
-                    text_str = " ".join(words)
+                    mutation_text = LocalGlyphCorruptor.generate_phonetic_mutation(rng.randint(3, 7), rng)
                     f_size = max(11, int(bh * 0.68))
                     try:
                         font = ImageFont.truetype("arial.ttf", f_size)
                     except Exception:
                         font = ImageFont.load_default()
-                    draw.text((ox + 4, oy + max(1, int((bh - f_size)/2))), text_str, fill=fg_col, font=font)
+                    draw.text((ox + 4, oy + max(1, int((bh - f_size)/2))), mutation_text, fill=fg_col, font=font)
 
                 corrupted_count += 1
 
@@ -546,26 +571,38 @@ class MisrememberedEngine:
         self.seed = seed_val
 
     def generate_green_light_cracks(self, w, h, progress, rng, origin=None):
-        """Branching phosphorescent green electric cracks (The Complex Green Light)."""
+        """
+        Authentic Kane Pixels Green Light: Inward perimeter caustic lightning & screen-edge surge.
+        Cracks crawl from outside borders/corners inward toward the center.
+        """
         overlay = np.zeros((h, w, 3), dtype=np.uint8)
-        if origin is None:
-            origin = (int(w * 0.48), int(h * 0.42))
         
-        ox, oy = origin
-        n_branches = 8
+        # Perimeter Origin Points along border perimeter (Outside In!)
+        perimeter_origins = [
+            (0, int(h * 0.15)),             # Left edge high
+            (0, int(h * 0.75)),             # Left edge low
+            (w - 1, int(h * 0.20)),         # Right edge high
+            (w - 1, int(h * 0.80)),         # Right edge low
+            (int(w * 0.25), 0),             # Top edge left
+            (int(w * 0.75), 0),             # Top edge right
+            (int(w * 0.30), h - 1),         # Bottom edge left
+            (int(w * 0.70), h - 1),         # Bottom edge right
+        ]
+        
+        center_x, center_y = w * 0.50, h * 0.50
         branch_rng = random.Random(rng.randint(0, 0xFFFF))
         
-        for b in range(n_branches):
-            angle = (b / float(n_branches)) * 2 * np.pi + branch_rng.uniform(-0.25, 0.25)
-            max_dist = np.sqrt(w**2 + h**2) * 0.80 * progress
-            cur_x, cur_y = float(ox), float(oy)
-            step_len = max(6, int(w * 0.020))
+        for ox, oy in perimeter_origins:
+            target_angle = math.atan2(center_y - oy, center_x - ox)
+            max_dist = np.sqrt(w**2 + h**2) * 0.65 * progress
             
+            cur_x, cur_y = float(ox), float(oy)
+            step_len = max(5, int(w * 0.016))
             points = [(int(cur_x), int(cur_y))]
             dist_traveled = 0.0
             
             while dist_traveled < max_dist:
-                cur_angle = angle + branch_rng.uniform(-0.60, 0.60)
+                cur_angle = target_angle + branch_rng.uniform(-0.55, 0.55)
                 cur_x += np.cos(cur_angle) * step_len
                 cur_y += np.sin(cur_angle) * step_len
                 dist_traveled += step_len
@@ -575,35 +612,41 @@ class MisrememberedEngine:
                 else:
                     break
                     
-                if branch_rng.random() < 0.25 and len(points) > 2:
-                    fork_angle = cur_angle + branch_rng.choice([-0.75, 0.75])
+                # Electric fork branches
+                if branch_rng.random() < 0.28 and len(points) > 2:
+                    fork_angle = cur_angle + branch_rng.choice([-0.70, 0.70])
                     fx, fy = cur_x, cur_y
                     fork_pts = [(int(fx), int(fy))]
-                    for _ in range(branch_rng.randint(3, 8)):
-                        fx += np.cos(fork_angle + branch_rng.uniform(-0.35, 0.35)) * (step_len * 0.7)
-                        fy += np.sin(fork_angle + branch_rng.uniform(-0.35, 0.35)) * (step_len * 0.7)
+                    for _ in range(branch_rng.randint(4, 9)):
+                        fx += np.cos(fork_angle + branch_rng.uniform(-0.30, 0.30)) * (step_len * 0.7)
+                        fy += np.sin(fork_angle + branch_rng.uniform(-0.30, 0.30)) * (step_len * 0.7)
                         if 0 <= int(fx) < w and 0 <= int(fy) < h:
                             fork_pts.append((int(fx), int(fy)))
                     if len(fork_pts) > 1:
-                        cv2.polylines(overlay, [np.array(fork_pts)], False, (20, 180, 40), 2, cv2.LINE_AA)
-                        cv2.polylines(overlay, [np.array(fork_pts)], False, (140, 255, 180), 1, cv2.LINE_AA)
+                        cv2.polylines(overlay, [np.array(fork_pts)], False, (15, 180, 40), 2, cv2.LINE_AA)
+                        cv2.polylines(overlay, [np.array(fork_pts)], False, (180, 255, 200), 1, cv2.LINE_AA)
 
             if len(points) > 1:
-                cv2.polylines(overlay, [np.array(points)], False, (10, 160, 30), 4, cv2.LINE_AA)
-                cv2.polylines(overlay, [np.array(points)], False, (60, 240, 90), 2, cv2.LINE_AA)
-                cv2.polylines(overlay, [np.array(points)], False, (220, 255, 230), 1, cv2.LINE_AA)
+                # 3-layer electric discharge glow
+                cv2.polylines(overlay, [np.array(points)], False, (10, 160, 30), 5, cv2.LINE_AA)
+                cv2.polylines(overlay, [np.array(points)], False, (40, 240, 80), 2, cv2.LINE_AA)
+                cv2.polylines(overlay, [np.array(points)], False, (230, 255, 235), 1, cv2.LINE_AA)
 
-        # Ambient phosphorescent green illumination surge
+        # Luminous Caustic Edge & Corner Illumination Surge
+        glow_map = np.zeros((h, w, 3), dtype=np.float32)
         Y, X = np.ogrid[:h, :w]
-        dist = np.sqrt((X - ox)**2 + (Y - oy)**2)
-        glow_radius = max(w, h) * 0.70
-        glow_intensity = np.clip(1.0 - (dist / glow_radius), 0, 1) ** 2 * 0.75 * progress
-        glow_layer = np.zeros((h, w, 3), dtype=np.float32)
-        glow_layer[:, :, 0] = glow_intensity * 35   # Blue
-        glow_layer[:, :, 1] = glow_intensity * 230  # Green
-        glow_layer[:, :, 2] = glow_intensity * 45   # Red
+        dist_top = Y
+        dist_bottom = h - Y
+        dist_left = X
+        dist_right = w - X
+        min_edge_dist = np.minimum(np.minimum(dist_top, dist_bottom), np.minimum(dist_left, dist_right))
+        edge_glow = np.clip(1.0 - (min_edge_dist / (max(w, h) * 0.35)), 0, 1) ** 1.8 * 0.85 * progress
         
-        return cv2.add(overlay, np.clip(glow_layer, 0, 255).astype(np.uint8))
+        glow_map[:, :, 0] = edge_glow * 35   # Blue
+        glow_map[:, :, 1] = edge_glow * 240  # Intense Emerald Green
+        glow_map[:, :, 2] = edge_glow * 75   # Lime Green tint
+
+        return cv2.add(overlay, np.clip(glow_map, 0, 255).astype(np.uint8))
 
     def render_no_signal_screen(self, width, height, lang):
         img = np.full((height, width, 3), (170, 10, 10), dtype=np.uint8) # Dark blue background
