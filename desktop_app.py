@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.1.0-FULL-PIPELINE"
+APP_VERSION = "v4.2.0-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -1541,59 +1541,51 @@ class MisrememberedEngine:
 
         out = frame.copy()
 
-        # ── 3. BACKROOMS COLOR GRADE (every frame — very fast) ──
+        # ── 3. BACKROOMS COLOR GRADE (photo + video) ──
         if master_v > 0.08:
             out = BackroomsColorGrade.apply(out, intensity=master_v * 0.72)
 
-        # ── 4. UNCANNY FACE DISTORTION (every 8 frames — YuNet is slow) ──
-        # Cache the warped face overlay and blend it onto each intermediate frame.
-        _FACE_SKIP = 8
-        if still_v > 0.05:
-            if frame_idx - self._face_cache_fi >= _FACE_SKIP or self._face_cache is None:
-                self._face_cache    = FaceDistortionEngine.apply(out, rng, intensity=still_v * master_v)
-                self._face_cache_fi = frame_idx
-            else:
-                # Reuse: just forward the cached warp (no flicker since warp is subtle geometry)
-                self._face_cache = out  # swap so next block gets current frame with cached warp shape
-            out = self._face_cache
+        # ══════════════════════════════════════════════════════════
+        # PHOTO-ONLY EFFECTS — heavy spatial operations that cause
+        # visible frame-to-frame stuttering in video and are too
+        # slow per-frame for reasonable export times.
+        # ══════════════════════════════════════════════════════════
+        if not is_video:
+            # ── FACE DISTORTION + YuNet detection (photo only) ──
+            if still_v > 0.05:
+                out = FaceDistortionEngine.apply(out, rng, intensity=still_v * master_v)
 
-        # ── 5. STILL LIFE ANATOMICAL RECONSTRUCTION (every frame — fast skin blob) ──
+            # ── ENVIRONMENT OBJECT HALLUCINATION (photo only) ──
+            if still_v > 0.05:
+                out = LocalEnvironmentHallucinator.apply_environment_hallucination(
+                    out, rng, intensity=still_v * master_v * 0.90
+                )
+
+            # ── NON-EUCLIDEAN BACKGROUND WARP (photo only) ──
+            if still_v > 0.05:
+                out = NonEuclideanWarp.apply(out, rng, intensity=still_v * master_v * 0.75, t_sec=0.0)
+
+        # ══════════════════════════════════════════════════════════
+        # PHOTO + VIDEO EFFECTS
+        # ══════════════════════════════════════════════════════════
+
+        # ── STILL LIFE ANATOMICAL RECONSTRUCTION (fast skin blob — both) ──
         if self.use_still_life and still_v > 0.05:
             out = LocalStillLifeEngine.apply_still_life_reconstruction(
                 out, rng, intensity=still_v * master_v, gloss=gloss_v
             )
 
-        # ── 6. BACKROOMS ENVIRONMENT OBJECT HALLUCINATION (every 5 frames) ──
-        _ENV_SKIP = 5
-        if still_v > 0.05:
-            if frame_idx - self._env_cache_fi >= _ENV_SKIP or self._env_cache is None:
-                self._env_cache    = LocalEnvironmentHallucinator.apply_environment_hallucination(
-                    out, rng, intensity=still_v * master_v * 0.90
-                )
-                self._env_cache_fi = frame_idx
-            out = self._env_cache
-
-        # ── 7. NON-EUCLIDEAN BACKGROUND WARP (every 6 frames — displacement map is expensive) ──
-        _WARP_SKIP = 6
-        if still_v > 0.05 and is_video:
-            if frame_idx - self._warp_cache_fi >= _WARP_SKIP or self._warp_cache is None:
-                self._warp_cache    = NonEuclideanWarp.apply(
-                    out, rng, intensity=still_v * master_v * 0.75, t_sec=t_sec
-                )
-                self._warp_cache_fi = frame_idx
-            out = self._warp_cache
-
-        # ── 8. GENERATIONAL DIGITAL DEGRADATION (every 2 frames — JPEG encode is slow) ──
-        if master_v > 0.25 and frame_idx % 2 == 0:
+        # ── GENERATIONAL DIGITAL DEGRADATION (both) ──
+        if master_v > 0.25:
             out = GenerationalDegradation.apply(out, rng, intensity=master_v * 0.55)
 
-        # ── 9. KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE (every frame) ──
+        # ── KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE (both) ──
         if text_v > 0.05:
             out = LocalGlyphCorruptor.corrupt_actual_frame_text(
                 out, rng, intensity=text_v * master_v, frame_idx=frame_idx, fps=fps
             )
 
-        # ── 10. "NOCLIPPING" FLOOR / CEILING TEARS (sporadic — fast) ──
+        # ── "NOCLIPPING" FLOOR / CEILING TEARS (video only — time-based) ──
         if master_v > 0.30 and is_video:
             out = NoclippingEffect.apply(out, rng, intensity=master_v * still_v)
 
@@ -1857,7 +1849,7 @@ class MisrememberedDesktopApp(ctk.CTk):
         if self.original_image_bgr is not None:
             rng = random.Random(self.engine.seed)
             sliders = self.get_sliders()
-            self.processed_image_bgr = self.engine.process_frame(self.original_image_bgr, rng, sliders)
+            self.processed_image_bgr = self.engine.process_frame(self.original_image_bgr, rng, sliders, frame_idx=0, fps=0)
             self._show_processed(self.processed_image_bgr)
 
     def _show_original(self, bgr_img):
