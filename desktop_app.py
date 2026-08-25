@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v3.6.0-FORGETS-ULTRA"
+APP_VERSION = "v4.0.0-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -930,7 +930,352 @@ class LocalEnvironmentHallucinator:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. MASTER COMPOSITE ENGINE
+# 5. BACKROOMS COLOR GRADE
+# Boosts saturation, maps toward the iconic yellow-beige fluorescent palette,
+# and applies a warm color cast to shadows — the "wrong" lighting of the Backrooms.
+# ─────────────────────────────────────────────────────────────────────────────
+class BackroomsColorGrade:
+    @staticmethod
+    def apply(bgr_img, intensity=0.80):
+        """
+        Applies the Backrooms color grade:
+        1. Saturation boost (oversaturated fluorescent look)
+        2. Color map toward yellow-beige-cream palette (wallpaper, carpet tones)
+        3. Warm shadow cast — everything feels like it's lit by dying fluorescents
+        """
+        if intensity < 0.02:
+            return bgr_img
+
+        hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+        # Boost saturation
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 + intensity * 0.50), 0, 255)
+        # Slightly overlit value (backrooms always feels slightly overexposed)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + intensity * 0.10), 0, 255)
+
+        graded = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+
+        # Color grade: suppress blue (cold), boost warm red/green
+        graded[:, :, 0] = np.clip(graded[:, :, 0] * (1.0 - intensity * 0.22), 0, 255)  # B down
+        graded[:, :, 1] = np.clip(graded[:, :, 1] * (1.0 + intensity * 0.07), 0, 255)  # G slightly up
+        graded[:, :, 2] = np.clip(graded[:, :, 2] * (1.0 + intensity * 0.14), 0, 255)  # R up (warmth)
+
+        # Blend: only partially apply so it doesn't completely destroy the image
+        blend_amt = min(0.70, intensity * 0.75)
+        out = cv2.addWeighted(bgr_img.astype(np.float32), 1.0 - blend_amt, graded, blend_amt, 0)
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. GENERATIONAL DIGITAL DEGRADATION ("Deep Fried" Decay)
+# Simulates recursive meme/share image degradation via JPEG re-encoding,
+# heavy grain injection, and HSV contrast/saturation crushing.
+# ─────────────────────────────────────────────────────────────────────────────
+class GenerationalDegradation:
+    @staticmethod
+    def apply(bgr_img, rng, intensity=0.80):
+        """
+        Runs the image through multiple generations of lossy digital decay:
+        1. N rounds of JPEG encode/decode at decreasing quality (blocking artifacts)
+        2. Heavy random grain noise layered on top
+        3. HSV contrast crushing + saturation clipping (the 'deep-fried' look)
+        """
+        if intensity < 0.05:
+            return bgr_img
+
+        out = bgr_img.copy()
+        generations = max(1, int(intensity * 3.5))
+
+        # ── 1. JPEG generation loss ──
+        for gen in range(generations):
+            quality = max(4, int(38 - intensity * 32 - gen * 5))
+            ret, buf = cv2.imencode('.jpg', out, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            if ret and buf is not None:
+                decoded = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                if decoded is not None and decoded.shape == out.shape:
+                    out = decoded
+
+        # ── 2. Heavy grain noise ──
+        grain = int(intensity * 48)
+        if grain > 0:
+            noise = np.random.randint(-grain, grain, out.shape, dtype=np.int16)
+            out = np.clip(out.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+
+        # ── 3. HSV contrast & saturation crush ──
+        hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
+        # Oversaturate then clip — creates that blown-out color look
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 + intensity * 1.30), 0, 255)
+        # Shadow lift + highlight crush → narrow the tonal range
+        v = hsv[:, :, 2]
+        lift = intensity * 18.0
+        crush = 255.0 - intensity * 22.0
+        v = np.clip((v - lift) / max(0.001, (crush - lift)), 0, 1) * 255.0
+        hsv[:, :, 2] = np.clip(v, 0, 255)
+        out = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+        return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. UNCANNY FACE DISTORTION & GLOWING OCULAR FLARES
+# Uses OpenCV built-in Haar cascade classifiers — zero additional installs.
+# Rubber-band warp hollows out facial geometry; radial caustic flares replace eyes.
+# ─────────────────────────────────────────────────────────────────────────────
+class FaceDistortionEngine:
+    _face_cascade = None
+    _eye_cascade  = None
+    _cascade_ok   = None   # None = not tried yet, True/False after first attempt
+
+    @classmethod
+    def _ensure_cascades(cls):
+        if cls._cascade_ok is not None:
+            return cls._cascade_ok
+        try:
+            fp = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            ep = cv2.data.haarcascades + 'haarcascade_eye.xml'
+            cls._face_cascade = cv2.CascadeClassifier(fp)
+            cls._eye_cascade  = cv2.CascadeClassifier(ep)
+            if cls._face_cascade.empty():
+                dbg("Face cascade empty — face distortion disabled", "FACE")
+                cls._cascade_ok = False
+            else:
+                dbg("Face+eye Haar cascades loaded OK", "FACE")
+                cls._cascade_ok = True
+        except Exception as e:
+            dbg(f"Haar cascade load error: {e}", "FACE")
+            cls._cascade_ok = False
+        return cls._cascade_ok
+
+    @staticmethod
+    def _rubber_band_warp(patch, rng, intensity):
+        """Radial stretch from face center — hollows out features, uncanny valley."""
+        bh, bw = patch.shape[:2]
+        if bh < 8 or bw < 8:
+            return patch
+        cx, cy = bw * 0.5, bh * 0.5
+        Y, X = np.mgrid[0:bh, 0:bw].astype(np.float32)
+        dx = X - cx
+        dy = Y - cy
+        dist = np.sqrt(dx**2 + dy**2) + 0.001
+        norm_dist = dist / max(cx, cy)
+        warp_amt = intensity * rng.uniform(0.10, 0.28)
+        # Non-linear radial: outer ring stretches, inner compresses
+        radial = 1.0 + warp_amt * (norm_dist ** 1.6)
+        src_x = np.clip(cx + dx * radial + rng.uniform(-bw*0.03, bw*0.03)*intensity, 0, bw-1).astype(np.float32)
+        src_y = np.clip(cy + dy * radial + rng.uniform(-bh*0.025, bh*0.025)*intensity, 0, bh-1).astype(np.float32)
+        return cv2.remap(patch, src_x, src_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+    @staticmethod
+    def _eye_flare(canvas, cx, cy, r, color_mode):
+        """Additive radial caustic flare over an eye center point."""
+        flare = np.zeros_like(canvas, dtype=np.uint8)
+        r = max(3, r)
+        if color_mode == 'red':
+            cols = [(0, 20, 80), (0, 0, 180), (0, 0, 240), (80, 100, 255)]
+        else:
+            cols = [(0, 50, 80), (0, 150, 220), (0, 210, 255), (100, 240, 255)]
+        for i, col in enumerate(cols):
+            cv2.circle(flare, (cx, cy), max(1, r * (4 - i)), col, -1, cv2.LINE_AA)
+        # Central overburn
+        cv2.circle(flare, (cx, cy), max(1, r // 3), (200, 230, 255), -1, cv2.LINE_AA)
+        # Horizontal lens streak
+        streak_l = r * 5
+        cv2.line(flare, (cx - streak_l, cy), (cx + streak_l, cy), cols[2], max(1, r // 3), cv2.LINE_AA)
+        return cv2.add(canvas, flare)
+
+    @staticmethod
+    def apply(bgr_img, rng, intensity=0.80):
+        if intensity < 0.05 or not FaceDistortionEngine._ensure_cascades():
+            return bgr_img
+
+        h, w = bgr_img.shape[:2]
+        # Detect at quarter resolution for speed
+        scale = 4
+        small = cv2.resize(bgr_img, (w // scale, h // scale))
+        gray_s = cv2.equalizeHist(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
+
+        faces = FaceDistortionEngine._face_cascade.detectMultiScale(
+            gray_s, scaleFactor=1.12, minNeighbors=4, minSize=(18, 18),
+            flags=cv2.CASCADE_SCALE_IMAGE
+        )
+        if len(faces) == 0:
+            return bgr_img
+
+        out = bgr_img.copy()
+        color_mode = rng.choice(['red', 'yellow'])
+
+        for (fx, fy, fw, fh) in faces:
+            fx, fy, fw, fh = fx*scale, fy*scale, fw*scale, fh*scale
+            fx = max(0, min(w-fw, fx)); fy = max(0, min(h-fh, fy))
+            fw = min(fw, w-fx);         fh = min(fh, h-fy)
+            if fw < 12 or fh < 12:
+                continue
+
+            roi = out[fy:fy+fh, fx:fx+fw].copy()
+
+            # Rubber-band distort
+            warped = FaceDistortionEngine._rubber_band_warp(roi, rng, intensity)
+            pad = max(4, min(fw, fh) // 7)
+            mask = np.zeros((fh, fw), dtype=np.float32)
+            mask[pad:-pad, pad:-pad] = 1.0
+            mask = cv2.GaussianBlur(mask, (pad*2+1, pad*2+1), 0)[:, :, np.newaxis]
+            out[fy:fy+fh, fx:fx+fw] = np.clip(
+                roi.astype(np.float32) * (1 - mask * min(0.90, intensity)) +
+                warped.astype(np.float32) * (mask * min(0.90, intensity)), 0, 255
+            ).astype(np.uint8)
+
+            # Eye detection in upper 60% of face ROI
+            face_gray = cv2.cvtColor(out[fy:fy+int(fh*0.65), fx:fx+fw], cv2.COLOR_BGR2GRAY)
+            eyes_found = []
+            if not FaceDistortionEngine._eye_cascade.empty():
+                eyes_found = FaceDistortionEngine._eye_cascade.detectMultiScale(
+                    face_gray, scaleFactor=1.1, minNeighbors=3, minSize=(8, 8)
+                )
+            if len(eyes_found) > 0:
+                for (ex, ey, ew, eh) in eyes_found[:2]:
+                    out = FaceDistortionEngine._eye_flare(
+                        out, fx + ex + ew//2, fy + ey + eh//2,
+                        max(3, int(ew*0.38)), color_mode
+                    )
+            else:
+                # Fallback: estimate eye positions via rule-of-thirds
+                ey_center = fy + int(fh * 0.38)
+                for ex_frac in [0.30, 0.70]:
+                    out = FaceDistortionEngine._eye_flare(
+                        out, fx + int(fw * ex_frac), ey_center,
+                        max(3, int(fw * 0.07)), color_mode
+                    )
+
+        return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. NON-EUCLIDEAN BACKGROUND WARP
+# Detects background regions (low edge density) and applies sinusoidal
+# displacement-map warping to make hallways feel infinite and ceilings wrong.
+# ─────────────────────────────────────────────────────────────────────────────
+class NonEuclideanWarp:
+    @staticmethod
+    def _background_mask(bgr_img):
+        """Low-edge-density areas = background/walls/floors — the target for spatial warping."""
+        gray  = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(cv2.GaussianBlur(gray, (5,5), 0), 25, 70)
+        dilated = cv2.dilate(edges, np.ones((28, 28), np.uint8))
+        bg = np.clip(1.0 - dilated.astype(np.float32) / 255.0, 0, 1)
+        return cv2.GaussianBlur(bg, (29, 29), 0)
+
+    @staticmethod
+    def apply(bgr_img, rng, intensity=0.80, t_sec=0.0):
+        """
+        Stretches detected background geometry via sinusoidal displacement maps:
+        - Horizontal corridor stretch (hallway pulls away from viewer)
+        - Radial breathing expansion (room inhales/exhales)
+        - Slow vertical ceiling/floor pull
+        Only applied inside the background mask, leaving subjects untouched.
+        """
+        if intensity < 0.05:
+            return bgr_img
+
+        h, w = bgr_img.shape[:2]
+        bg = NonEuclideanWarp._background_mask(bgr_img)
+        Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
+
+        x_n = X / max(w, 1)
+        y_n = Y / max(h, 1)
+        cx, cy = w * 0.5, h * 0.5
+
+        # Horizontal corridor stretch (slow phase drift over time)
+        ph = t_sec * 0.12 + rng.uniform(0, 0.4)
+        warp_x = intensity * w * 0.048 * np.sin(y_n * np.pi * 2.1 + ph)
+
+        # Vertical ceiling/floor pull
+        pv = t_sec * 0.07
+        warp_y = intensity * h * 0.032 * np.sin(x_n * np.pi * 1.6 + pv)
+
+        # Radial breathing — room subtly expands/contracts
+        dx = X - cx; dy = Y - cy
+        dist = np.sqrt(dx**2 + dy**2) / max(w, h)
+        breathe = intensity * 0.028 * np.sin(dist * np.pi * 1.8 + t_sec * 0.18)
+        warp_x += dx * breathe
+        warp_y += dy * breathe
+
+        # Apply warp only inside background mask
+        src_x = np.clip(X + warp_x * bg, 0, w-1).astype(np.float32)
+        src_y = np.clip(Y + warp_y * bg, 0, h-1).astype(np.float32)
+        warped = cv2.remap(bgr_img, src_x, src_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+        alpha = (bg * min(0.88, intensity))[:, :, np.newaxis]
+        out = bgr_img.astype(np.float32) * (1.0 - alpha) + warped.astype(np.float32) * alpha
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. "NOCLIPPING" TEARS
+# Detects flat floor/ceiling planes via horizontal edge dominance and briefly
+# overrides them with pure black static — reality breaking apart.
+# ─────────────────────────────────────────────────────────────────────────────
+class NoclippingEffect:
+    @staticmethod
+    def _floor_planes(bgr_img):
+        """Find candidate floor/ceiling strips: rows with dominant horizontal edges."""
+        h, w = bgr_img.shape[:2]
+        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+        sx = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
+        sy = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+        horiz_dom = (sy > sx * 1.4).astype(np.float32)  # more horizontal = floor/ceiling
+
+        planes = []
+        # Search bottom 55% of frame (floor), top 20% (ceiling)
+        for region_y0, region_y1 in [(int(h*0.45), h), (0, int(h*0.20))]:
+            row_d = np.mean(horiz_dom[region_y0:region_y1, :], axis=1)
+            in_p = False; ps = 0
+            for i, d in enumerate(row_d):
+                if d > 0.28 and not in_p:
+                    ps = i; in_p = True
+                elif d < 0.12 and in_p:
+                    if i - ps > 6:
+                        planes.append((region_y0 + ps, region_y0 + i))
+                    in_p = False
+        return planes[:3]
+
+    @staticmethod
+    def apply(bgr_img, rng, intensity=0.80):
+        """Sporadic black-static tears on floor/ceiling geometry — noclip glitch."""
+        if intensity < 0.05 or rng.random() > intensity * 0.22:
+            return bgr_img
+
+        h, w = bgr_img.shape[:2]
+        out = bgr_img.copy()
+        planes = NoclippingEffect._floor_planes(bgr_img)
+
+        if not planes:
+            # Fallback: random strip in lower frame
+            sy = rng.randint(int(h * 0.55), int(h * 0.88))
+            sh = rng.randint(int(h * 0.04), int(h * 0.14))
+            planes = [(sy, min(h, sy + sh))]
+
+        for (y0, y1) in planes:
+            if y1 <= y0:
+                continue
+            rh = y1 - y0
+            # Black static: mostly black with very faint pixel noise
+            static = np.random.randint(0, 14, (rh, w, 3), dtype=np.uint8)
+            # Feather the top edge
+            feather_r = max(2, rh // 5)
+            for fi in range(min(feather_r, rh)):
+                a = fi / feather_r
+                out[y0 + fi, :] = np.clip(
+                    out[y0 + fi, :].astype(np.float32) * (1 - a) + static[fi] * a, 0, 255
+                ).astype(np.uint8)
+            if feather_r < rh:
+                out[y0 + feather_r:y1, :] = static[feather_r:, :]
+
+        return out
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. MASTER COMPOSITE ENGINE
 # Green Light time pause + electric cracks, visual interrupts, and Forgets corruption
 # ─────────────────────────────────────────────────────────────────────────────
 class MisrememberedEngine:
@@ -1133,27 +1478,50 @@ class MisrememberedEngine:
 
         out = frame.copy()
 
-        # ── 3. STILL LIFE ANATOMICAL RECONSTRUCTION (person) ──
+        # ── 3. BACKROOMS COLOR GRADE ──
+        # Apply canonical yellow-warm-beige fluorescent palette first so all
+        # subsequent effects operate on the correctly tinted image.
+        if master_v > 0.08:
+            out = BackroomsColorGrade.apply(out, intensity=master_v * 0.72)
+
+        # ── 4. UNCANNY FACE DISTORTION + GLOWING OCULAR FLARES ──
+        # Rubber-band radial warp on detected faces; additive red/yellow eye flares.
+        if still_v > 0.05:
+            out = FaceDistortionEngine.apply(out, rng, intensity=still_v * master_v)
+
+        # ── 5. STILL LIFE ANATOMICAL RECONSTRUCTION (person flesh/texture) ──
         if self.use_still_life and still_v > 0.05:
             out = LocalStillLifeEngine.apply_still_life_reconstruction(
                 out, rng, intensity=still_v * master_v, gloss=gloss_v
             )
 
-        # ── 3b. BACKROOMS ENVIRONMENT OBJECT HALLUCINATION ──
-        # Detects furniture/architecture in any frame (chairs, bookshelves, tables,
-        # walls) and applies backrooms-style effects: warp, erase, ghost-double,
-        # or phantom doorway. Runs independently of person detection — works on
-        # camera-panning room footage where no person is present.
+        # ── 6. BACKROOMS ENVIRONMENT OBJECT HALLUCINATION ──
+        # Chairs, bookshelves, doors — warp, erase, ghost-double, phantom doorways.
         if still_v > 0.05:
             out = LocalEnvironmentHallucinator.apply_environment_hallucination(
                 out, rng, intensity=still_v * master_v * 0.90
             )
 
-        # ── 4. KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE ──
+        # ── 7. NON-EUCLIDEAN BACKGROUND WARP ──
+        # Sinusoidal displacement map stretches hallways/walls into impossible geometry.
+        if still_v > 0.05 and is_video:
+            out = NonEuclideanWarp.apply(out, rng, intensity=still_v * master_v * 0.75, t_sec=t_sec)
+
+        # ── 8. GENERATIONAL DIGITAL DEGRADATION (first-pass, lighter) ──
+        # JPEG artifacts + grain + HSV crush applied to the image as a whole.
+        if master_v > 0.25:
+            out = GenerationalDegradation.apply(out, rng, intensity=master_v * 0.55)
+
+        # ── 9. KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE ──
         if text_v > 0.05:
             out = LocalGlyphCorruptor.corrupt_actual_frame_text(
                 out, rng, intensity=text_v * master_v, frame_idx=frame_idx, fps=fps
             )
+
+        # ── 10. "NOCLIPPING" FLOOR / CEILING TEARS ──
+        # Sporadic black-static overrides on detected floor/ceiling planes.
+        if master_v > 0.30 and is_video:
+            out = NoclippingEffect.apply(out, rng, intensity=master_v * still_v)
 
         return out
 
