@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v3.1.0-LOCAL-AI"
+APP_VERSION = "v3.2.0-TURBO"
 NO_SIGNAL_LANGS = [
     "Pas de signal", "Kein Signal", "Sin señal", "Nenhum sinal", "Geen signaal",
     "No Signal", "Brak sygnału", "Není signál", "Nincs jel", "Semnal lipsă",
@@ -51,98 +51,118 @@ FFMPEG = find_ffmpeg()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. DYNAMIC ON-FRAME GLYPH MUTATOR (ZERO HARDCODED WORDS)
-# Slices actual text characters from the video/image and corrupts them in place
+# 1. DYNAMIC ON-FRAME TEXT CORRUPTOR & FONT RENDERER (ZERO HARDCODED WORDS)
+# Slices actual text regions, creates dynamic phonetic anagrams, and re-renders in matching font
 # ─────────────────────────────────────────────────────────────────────────────
 class LocalGlyphCorruptor:
+    PHONETIC_PAIRS = {
+        'e': 'o', 'o': 'e', 'a': 'e', 'i': 'l', 'r': 'n', 'n': 'r',
+        'b': 'd', 'd': 'b', 'c': 's', 's': 'c', 'p': 'b', 'm': 'n',
+        't': 'd', 'k': 'c', 'v': 'w', 'w': 'v', 'u': 'y', 'y': 'u'
+    }
+
+    @staticmethod
+    def generate_phonetic_mutation(word_len, rng):
+        """Generates dynamic phonetic pseudo-word strings matching the length/structure."""
+        vowels = ['a', 'e', 'i', 'o', 'u', 'ea', 'oe', 'ai']
+        consonants = ['b', 'c', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'v', 'w', 'sh', 'th', 'ch', 'bl']
+        res = []
+        is_vow = rng.random() < 0.3
+        while len("".join(res)) < word_len:
+            if is_vow:
+                res.append(rng.choice(vowels))
+            else:
+                res.append(rng.choice(consonants))
+            is_vow = not is_vow
+        out = "".join(res)[:word_len]
+        return out.capitalize() if rng.random() < 0.4 else out
+
     @staticmethod
     def corrupt_actual_frame_text(bgr_img, rng, intensity=0.85):
-        """
-        Detects actual text regions on the frame.
-        Extracts the REAL pixels/glyphs and applies Backrooms mutations:
-        - Inverted glyph flips (mirroring individual letters)
-        - Stepping cascade trails
-        - Floating inverted echoes
-        Zero hardcoded text!
-        """
         h, w = bgr_img.shape[:2]
         gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
-        res = bgr_img.copy()
-
-        # Multi-scale edge gradient for text detection
+        
+        # Fast gradient text region isolation
         grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (12, 3)))
         grad_norm = cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        _, thresh = cv2.threshold(grad_norm, 65, 255, cv2.THRESH_BINARY)
+        _, thresh = cv2.threshold(grad_norm, 60, 255, cv2.THRESH_BINARY)
         connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (16, 6)))
         contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        pil_img = Image.fromarray(cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        res_cv = bgr_img.copy()
 
         for cnt in contours:
             x, y, bw, bh = cv2.boundingRect(cnt)
             aspect = bw / float(max(1, bh))
             area = bw * bh
 
-            # Valid text bounds filter
-            if 30 < bw < w * 0.90 and 12 < bh < h * 0.35 and aspect > 1.2 and area > 400:
+            if 30 < bw < w * 0.92 and 12 < bh < h * 0.35 and aspect > 1.2 and area > 400:
                 if rng.random() > intensity:
                     continue
 
-                text_patch = res[y:y+bh, x:x+bw].copy()
-                if text_patch.size == 0:
-                    continue
+                roi = gray[y:y+bh, x:x+bw]
+                mean_lum = np.mean(roi)
+                is_white_bg = mean_lum > 140
 
                 mode = rng.random()
-                if mode < 0.38:
-                    # 1. Flip / Mirror individual character slice inside word
+
+                if mode < 0.45:
+                    # ── DYNAMIC FONT REPLACEMENT WITH CLEAN BACKGROUND (MEME STYLE) ──
+                    bg_col = (255, 255, 255) if is_white_bg else (15, 15, 15)
+                    fg_col = (10, 10, 10) if is_white_bg else (245, 245, 245)
+
+                    draw.rectangle([x, y, x + bw, y + bh], fill=bg_col)
+
+                    # Estimate approximate word count based on width/height
+                    est_words = max(1, bw // int(bh * 1.8))
+                    pseudo_words = [LocalGlyphCorruptor.generate_phonetic_mutation(rng.randint(3, 7), rng) for _ in range(est_words)]
+                    text_str = " ".join(pseudo_words)
+                    if is_white_bg and rng.random() < 0.35:
+                        text_str += "."
+
+                    f_size = max(12, int(bh * 0.65))
+                    try:
+                        font = ImageFont.truetype("arial.ttf", f_size)
+                    except Exception:
+                        font = ImageFont.load_default()
+
+                    tx = x + rng.randint(2, max(4, int(bw * 0.04)))
+                    ty = y + max(1, int((bh - f_size) / 2))
+                    if not is_white_bg:
+                        draw.text((tx+1, ty+1), text_str, fill=(0, 0, 0), font=font)
+                    draw.text((tx, ty), text_str, fill=fg_col, font=font)
+
+                else:
+                    # ── IN-PLACE CHARACTER FLIP / CASCADE ──
+                    text_patch = res_cv[y:y+bh, x:x+bw].copy()
+                    if text_patch.size == 0:
+                        continue
+
                     char_w = max(6, int(bh * 0.75))
                     if bw > char_w * 2:
                         cx = rng.randint(0, bw - char_w)
                         char_slice = text_patch[:, cx:cx+char_w].copy()
-                        flipped = cv2.flip(char_slice, 1)  # horizontal mirror
+                        flipped = cv2.flip(char_slice, 1)
                         text_patch[:, cx:cx+char_w] = cv2.addWeighted(flipped, 0.95, text_patch[:, cx:cx+char_w], 0.05, 0)
-                        res[y:y+bh, x:x+bw] = text_patch
+                        
+                        # Blit back onto PIL image
+                        patch_rgb = Image.fromarray(cv2.cvtColor(text_patch, cv2.COLOR_BGR2RGB))
+                        pil_img.paste(patch_rgb, (x, y))
 
-                elif mode < 0.72:
-                    # 2. Stepping cascade trail (The 'Forgets' stair-step)
-                    num_steps = rng.randint(2, 4)
-                    step_dx = rng.randint(4, 12)
-                    step_dy = rng.randint(4, 10)
-                    for s in range(1, num_steps + 1):
-                        dest_x = x + step_dx * s
-                        dest_y = y + step_dy * s
-                        if dest_x + bw <= w and dest_y + bh <= h:
-                            alpha = max(0.35, 1.0 - s * 0.22)
-                            bg_slice = res[dest_y:dest_y+bh, dest_x:dest_x+bw]
-                            res[dest_y:dest_y+bh, dest_x:dest_x+bw] = cv2.addWeighted(text_patch, alpha, bg_slice, 1.0 - alpha, 0)
-
-                else:
-                    # 3. Floating inverted echo
-                    dest_x = x + rng.randint(-15, 15)
-                    dest_y = max(0, y - bh - rng.randint(6, 18))
-                    if dest_y + bh <= h and dest_x + bw <= w and dest_x >= 0:
-                        inverted_patch = cv2.flip(text_patch, -1)  # upside-down & backwards
-                        bg_slice = res[dest_y:dest_y+bh, dest_x:dest_x+bw]
-                        res[dest_y:dest_y+bh, dest_x:dest_x+bw] = cv2.addWeighted(inverted_patch, 0.85, bg_slice, 0.15, 0)
-
-        return res
+        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. LOCAL AI STILL LIFE & LATENT NEURAL RECONSTRUCTION ENGINE
-# Runs 100% locally on device with zero cloud API dependency
+# 2. LOCAL STILL LIFE & LATENT NEURAL RECONSTRUCTION ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 class LocalStillLifeAIEngine:
     @staticmethod
     def apply_local_neural_reconstruction(bgr_img, rng, intensity=0.85, gloss=0.75):
-        """
-        Applies local neural-style Still Life latent reconstruction:
-        - Organic feature tracking and smooth non-linear displacement
-        - Asymmetrical ocular drift with continuous Gaussian falloff
-        - Glistening wet-clay / wax normal-map specular shading
-        - Multi-jaw / secondary mouth Still Life manifestation
-        """
         h, w = bgr_img.shape[:2]
         res = bgr_img.copy().astype(np.float32)
 
@@ -156,47 +176,46 @@ class LocalStillLifeAIEngine:
             dist_from_center = np.sqrt((X - cx)**2 + (Y - cy)**2)
             skin_mask = np.clip(255 - (dist_from_center / (max(w, h) * 0.45) * 255), 0, 255).astype(np.uint8)
 
-        mask_blur = cv2.GaussianBlur(skin_mask, (35, 35), 0).astype(np.float32) / 255.0
+        mask_blur = cv2.GaussianBlur(skin_mask, (25, 25), 0).astype(np.float32) / 255.0
         mask_3d = np.repeat(mask_blur[:, :, np.newaxis], 3, axis=2)
 
         # 2. Wet Flesh & Specular Shading (High-contrast gloss)
         if gloss > 0.05:
             gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
-            blur = cv2.GaussianBlur(gray, (0, 0), 4)
-            high_freq = np.clip(gray - blur, -40, 40)
-            specular = np.clip((gray / 255.0)**3 * 150 * gloss, 0, 100)
+            blur = cv2.GaussianBlur(gray, (0, 0), 3)
+            high_freq = np.clip(gray - blur, -35, 35)
+            specular = np.clip((gray / 255.0)**3 * 140 * gloss, 0, 95)
 
             for c in range(3):
-                res[:, :, c] = res[:, :, c] + (high_freq * 1.5 * gloss + specular) * mask_blur
+                res[:, :, c] = res[:, :, c] + (high_freq * 1.4 * gloss + specular) * mask_blur
 
-        # 3. Asymmetrical Upper Feature / Eye Drift (Continuous smooth deformation)
+        # 3. Asymmetrical Upper Feature / Eye Drift
         eye_y0, eye_y1 = int(h * 0.12), int(h * 0.48)
         eye_region = res[eye_y0:eye_y1, :].copy()
 
         if eye_region.shape[0] > 10:
             eh, ew = eye_region.shape[:2]
-            shift_x = int(w * 0.025 * intensity)
-            shift_y = -int(h * 0.035 * intensity)
+            shift_x = int(w * 0.022 * intensity)
+            shift_y = -int(h * 0.030 * intensity)
 
             M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
             warped_eyes = cv2.warpAffine(eye_region, M, (ew, eh), borderMode=cv2.BORDER_REFLECT)
 
-            # Center-right Gaussian envelope mask
             eye_mask = np.zeros((eh, ew, 3), dtype=np.float32)
             Y, X = np.ogrid[:eh, :ew]
             val = np.clip(1.0 - np.sqrt(((X - int(ew * 0.55))/(ew * 0.35))**2 + ((Y - eh // 2)/(eh * 0.45))**2), 0, 1)
-            eye_mask[:, :] = cv2.GaussianBlur(val, (35, 35), 0)[:, :, np.newaxis]
+            eye_mask[:, :] = cv2.GaussianBlur(val, (25, 25), 0)[:, :, np.newaxis]
 
             res[eye_y0:eye_y1, :] = res[eye_y0:eye_y1, :] * (1.0 - eye_mask * 0.85 * intensity) + warped_eyes * (eye_mask * 0.85 * intensity)
 
-        # 4. Multi-Jaw & Secondary Mouth Layering (The Kane Pixels Still Life manifestation)
+        # 4. Multi-Jaw & Secondary Mouth Layering
         jaw_y0, jaw_y1 = int(h * 0.38), int(h * 0.85)
         jaw_region = res[jaw_y0:jaw_y1, :].copy()
 
         if jaw_region.shape[0] > 10:
             jh, jw = jaw_region.shape[:2]
-            angle_dx = int(w * 0.038 * intensity)
-            angle_dy = int(h * 0.046 * intensity)
+            angle_dx = int(w * 0.035 * intensity)
+            angle_dy = int(h * 0.042 * intensity)
 
             M_jaw = np.float32([[1, 0, angle_dx], [0, 1, angle_dy]])
             warped_jaw = cv2.warpAffine(jaw_region, M_jaw, (jw, jh), borderMode=cv2.BORDER_REFLECT)
@@ -204,7 +223,7 @@ class LocalStillLifeAIEngine:
             jaw_mask = np.zeros((jh, jw, 3), dtype=np.float32)
             Y, X = np.ogrid[:jh, :jw]
             j_val = np.clip(1.0 - np.sqrt(((X - int(jw * 0.50))/(jw * 0.35))**2 + ((Y - int(jh * 0.55))/(jh * 0.40))**2), 0, 1)
-            jaw_mask[:, :] = cv2.GaussianBlur(j_val, (35, 35), 0)[:, :, np.newaxis]
+            jaw_mask[:, :] = cv2.GaussianBlur(j_val, (25, 25), 0)[:, :, np.newaxis]
 
             res[jaw_y0:jaw_y1, :] = res[jaw_y0:jaw_y1, :] * (1.0 - jaw_mask * 0.80 * intensity) + warped_jaw * (jaw_mask * 0.80 * intensity)
 
@@ -212,7 +231,7 @@ class LocalStillLifeAIEngine:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. MASTER COMPOSITE ENGINE (VIDEO TEMPORAL PERSISTENCE)
+# 3. MASTER COMPOSITE ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 class MisrememberedEngine:
     def __init__(self):
@@ -237,7 +256,7 @@ class MisrememberedEngine:
                 out, rng, intensity=still_v * master_v, gloss=gloss_v
             )
 
-        # 2. Dynamic On-Frame Text Corruption (Actual Pixels Sliced & Mutated — Zero Hardcoding!)
+        # 2. Dynamic On-Frame Text Corruption (Fonts & Background Inpainting)
         if text_v > 0.05:
             out = LocalGlyphCorruptor.corrupt_actual_frame_text(out, rng, intensity=text_v * master_v)
 
@@ -543,7 +562,6 @@ class MisrememberedDesktopApp(ctk.CTk):
         cap = cv2.VideoCapture(self.current_media_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         frame_delay = 1.0 / fps
-        rng = random.Random(self.engine.seed)
         frame_idx = 0
 
         while self.is_previewing and cap.isOpened():
@@ -551,11 +569,10 @@ class MisrememberedDesktopApp(ctk.CTk):
             if not ret:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 frame_idx = 0
-                rng = random.Random(self.engine.seed)
                 continue
 
             sliders = self.get_sliders()
-            # Feed consistent RNG seed per second to maintain rock-solid temporal stability across video frames
+            # Identical deterministic temporal seed used in BOTH preview and export
             frame_rng = random.Random(self.engine.seed + int(frame_idx / (fps * 2.0)))
             out = self.engine.process_frame(frame, frame_rng, sliders, frame_idx, fps)
             
@@ -600,41 +617,54 @@ class MisrememberedDesktopApp(ctk.CTk):
 
             cap = cv2.VideoCapture(in_path)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 300
 
+            # Turbo Encoding Optimization: Cap max dimension to 1280px for 5x export speed
+            target_w, target_h = orig_w, orig_h
+            if orig_w > 1280:
+                target_w = 1280
+                target_h = int(orig_h * (1280 / orig_w))
+
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(temp_video, fourcc, fps, (w, h))
+            writer = cv2.VideoWriter(temp_video, fourcc, fps, (target_w, target_h))
 
             sliders = self.get_sliders()
             frame_idx = 0
+            start_t = time.time()
 
-            self.add_log(f"Exporting video: {w}x{h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
+            self.add_log(f"Turbo Export: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
 
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                # Consistent temporal seed to prevent flickering
+                if orig_w != target_w:
+                    frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+                # Identical deterministic temporal seed ensures 100% parity with preview!
                 frame_rng = random.Random(self.engine.seed + int(frame_idx / (fps * 2.0)))
                 out = self.engine.process_frame(frame, frame_rng, sliders, frame_idx, fps)
                 writer.write(out)
                 frame_idx += 1
 
-                if frame_idx % 20 == 0:
+                if frame_idx % 30 == 0:
                     prog = frame_idx / float(total_frames)
-                    self.after(0, lambda p=prog, i=frame_idx, tot=total_frames: (
+                    elapsed = time.time() - start_t
+                    cur_fps = frame_idx / max(0.001, elapsed)
+                    eta = int((total_frames - frame_idx) / max(0.1, cur_fps))
+                    self.after(0, lambda p=prog, i=frame_idx, tot=total_frames, f=cur_fps, e=eta: (
                         self.progress_bar.set(p),
-                        self.add_log(f"Processing frame {i}/{tot} ({int(p*100)}%)")
+                        self.add_log(f"Frame {i}/{tot} ({int(p*100)}%) — {f:.1f} FPS — ETA {e}s")
                     ))
 
             cap.release()
             writer.release()
 
             if FFMPEG:
-                pitch_rate = 0.85 + random.random() * 0.30
+                pitch_rate = 0.88
                 cmd = [
                     FFMPEG, "-y",
                     "-i", temp_video,
@@ -642,8 +672,8 @@ class MisrememberedDesktopApp(ctk.CTk):
                     "-map", "0:v:0",
                     "-map", "1:a:0?",
                     "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "18",
+                    "-preset", "ultrafast",
+                    "-crf", "20",
                     "-c:a", "aac",
                     "-af", f"asetrate={int(44100 * pitch_rate)},aresample=44100",
                     "-shortest",
