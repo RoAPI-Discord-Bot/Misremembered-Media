@@ -461,101 +461,75 @@ class LocalGlyphCorruptor:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. 2023 EARLY AI LATENT HALLUCINATION & STILL LIFE ENGINE
-# Full replication of 2023 early AI latent space distortions (Pinocchio / VQGAN style):
-# - Multi-scale spatial latent flow vector displacement
-# - Wet clay & charred molten flesh shading with deep pore/wrinkle specular sheen
-# - Incandescent glowing eye/nose cavities
-# - Asymmetric ocular and molten jaw distortion
+# 3. 2023 EARLY AI STILL LIFE & ANATOMICAL ENGINE
+# Clean subject-targeted 2023 AI flesh/texture distortion (ZERO global background waves):
+# - Precise subject/skin segmentation
+# - Wet clay & charred flesh shading with deep pore/wrinkle specular sheen
+# - Target-masked asymmetric ocular & jaw distortion
 # ─────────────────────────────────────────────────────────────────────────────
 class LocalStillLifeEngine:
     @staticmethod
     def apply_still_life_reconstruction(bgr_img, rng, intensity=0.85, gloss=0.75):
         h, w = bgr_img.shape[:2]
-        res = bgr_img.copy().astype(np.float32)
+        out = bgr_img.copy().astype(np.float32)
 
-        # 1. Multi-scale Latent Flow Distortion (Simulates 2023 latent space noise warping)
-        grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
+        # 1. Precise Subject / Skin Segmentation (Strictly targeted, NO global radial circle fallback)
+        ycrcb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2YCrCb)
+        skin_mask = cv2.inRange(ycrcb, np.array([0, 133, 77]), np.array([255, 173, 127]))
         
-        noise_small_x = rng.uniform(-1, 1) * cv2.GaussianBlur(np.random.normal(0, 1, (max(4, h//16), max(4, w//16))).astype(np.float32), (9, 9), 0)
-        noise_small_y = rng.uniform(-1, 1) * cv2.GaussianBlur(np.random.normal(0, 1, (max(4, h//16), max(4, w//16))).astype(np.float32), (9, 9), 0)
-        
-        flow_x = cv2.resize(noise_small_x, (w, h), interpolation=cv2.INTER_CUBIC) * (w * 0.040 * intensity)
-        flow_y = cv2.resize(noise_small_y, (w, h), interpolation=cv2.INTER_CUBIC) * (h * 0.048 * intensity)
-        
-        map_x = np.clip(grid_x + flow_x, 0, w - 1).astype(np.float32)
-        map_y = np.clip(grid_y + flow_y, 0, h - 1).astype(np.float32)
-        warped_latent = cv2.remap(res, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        # If no human skin found, isolate high-contrast central subject contour
+        if np.sum(skin_mask) < (w * h * 0.01 * 255):
+            gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (15, 15), 0)
+            _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            subject_mask = np.zeros((h, w), dtype=np.uint8)
+            for cnt in contours:
+                if cv2.contourArea(cnt) > (w * h * 0.03):
+                    cv2.drawContours(subject_mask, [cnt], -1, 255, -1)
+            if np.sum(subject_mask) > 0:
+                skin_mask = subject_mask
+            else:
+                # Nothing to distort — return original image untouched! (ZERO global waves)
+                return bgr_img
 
-        # 2. Subject Skin & Organic Flesh Segmentation
-        ycrcb = cv2.cvtColor(np.clip(warped_latent, 0, 255).astype(np.uint8), cv2.COLOR_BGR2YCrCb)
-        skin_mask = cv2.inRange(ycrcb, np.array([0, 130, 75]), np.array([255, 178, 130]))
+        mask_f = cv2.GaussianBlur(skin_mask, (21, 21), 0).astype(np.float32) / 255.0
 
-        if np.sum(skin_mask) < (w * h * 0.03 * 255):
-            Y, X = np.ogrid[:h, :w]
-            cx, cy = w // 2, int(h * 0.48)
-            dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
-            skin_mask = np.clip(255 - (dist / (max(w, h) * 0.50) * 255), 0, 255).astype(np.uint8)
+        # 2. 2023 Wet Clay & Charred Flesh Shading (Targeted ONLY inside mask)
+        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        blur_g = cv2.GaussianBlur(gray, (0, 0), 3)
+        high_pass_texture = np.clip(gray - blur_g, -40, 40)
+        specular_sheen = np.clip(((gray / 255.0) ** 3.2) * 200.0 * gloss, 0, 130)
 
-        mask_f = cv2.GaussianBlur(skin_mask, (31, 31), 0).astype(np.float32) / 255.0
-
-        # 3. 2023 Wet Clay & Charred Molten Shading (The "Piteen / Teat Salt" Look)
-        gray = cv2.cvtColor(np.clip(warped_latent, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
-        blur_g = cv2.GaussianBlur(gray, (0, 0), 4)
-        high_pass_texture = np.clip(gray - blur_g, -45, 45)
-        specular_sheen = np.clip(((gray / 255.0) ** 3.5) * 220.0 * gloss, 0, 140)
-
-        dark_clay_tint = np.zeros_like(warped_latent)
-        dark_clay_tint[:, :, 0] = -35 * intensity # Reduce Blue
-        dark_clay_tint[:, :, 1] = -15 * intensity # Slight Green drop
-        dark_clay_tint[:, :, 2] = 20 * intensity  # Warm Red boost
+        dark_clay_tint = np.zeros_like(out)
+        dark_clay_tint[:, :, 0] = -30 * intensity # Blue drop
+        dark_clay_tint[:, :, 1] = -12 * intensity # Green drop
+        dark_clay_tint[:, :, 2] = 22 * intensity  # Warm Clay / Ember boost
 
         for c in range(3):
-            flesh_channel = warped_latent[:, :, c] + (high_pass_texture * 1.8 * gloss + specular_sheen + dark_clay_tint[:, :, c])
-            warped_latent[:, :, c] = warped_latent[:, :, c] * (1.0 - mask_f) + np.clip(flesh_channel, 0, 255) * mask_f
+            flesh_val = out[:, :, c] + (high_pass_texture * 1.6 * gloss + specular_sheen + dark_clay_tint[:, :, c])
+            out[:, :, c] = out[:, :, c] * (1.0 - mask_f) + np.clip(flesh_val, 0, 255) * mask_f
 
-        # 4. Molten Glowing Eye/Nose Cavities (Incandescent burning eyes)
-        if intensity > 0.40 and rng.random() < 0.85:
-            eye_y0, eye_y1 = int(h * 0.18), int(h * 0.46)
-            eye_x0, eye_x1 = int(w * 0.22), int(w * 0.78)
-            cavity_h = eye_y1 - eye_y0
-            cavity_w = eye_x1 - eye_x0
-            
-            if cavity_h > 5 and cavity_w > 5:
-                Y, X = np.ogrid[:cavity_h, :cavity_w]
-                left_eye_dist = np.sqrt((X - int(cavity_w * 0.28))**2 + ((Y - cavity_h//2)*1.4)**2)
-                right_eye_dist = np.sqrt((X - int(cavity_w * 0.72))**2 + ((Y - cavity_h//2)*1.4)**2)
-                
-                glow_rad = max(10, int(cavity_w * 0.18))
-                glow_l = np.clip(1.0 - (left_eye_dist / glow_rad), 0, 1) ** 2
-                glow_r = np.clip(1.0 - (right_eye_dist / glow_rad), 0, 1) ** 2
-                glow_total = np.clip(glow_l + glow_r, 0, 1)[:, :, np.newaxis]
-                
-                amber_flare = np.zeros((cavity_h, cavity_w, 3), dtype=np.float32)
-                amber_flare[:, :] = [15, 190, 255]
-                
-                warped_latent[eye_y0:eye_y1, eye_x0:eye_x1] = (
-                    warped_latent[eye_y0:eye_y1, eye_x0:eye_x1] * (1.0 - glow_total * 0.60 * intensity) +
-                    amber_flare * (glow_total * 0.60 * intensity)
-                )
+        # 3. Asymmetrical Anatomical Ocular & Jaw Shift (Masked strictly to subject)
+        eye_y0, eye_y1 = int(h * 0.15), int(h * 0.50)
+        if (eye_y1 - eye_y0) > 10:
+            shift_x = int(w * 0.022 * intensity)
+            shift_y = -int(h * 0.028 * intensity)
+            M_eye = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+            warped_eyes = cv2.warpAffine(out[eye_y0:eye_y1, :], M_eye, (w, eye_y1 - eye_y0), borderMode=cv2.BORDER_REFLECT)
+            eye_mask = mask_f[eye_y0:eye_y1, :, np.newaxis] * 0.80 * intensity
+            out[eye_y0:eye_y1, :] = out[eye_y0:eye_y1, :] * (1.0 - eye_mask) + warped_eyes * eye_mask
 
-        # 5. Molten Asymmetric Jaw & Mouth Distortion
-        jaw_y0, jaw_y1 = int(h * 0.48), int(h * 0.88)
-        jaw_region = warped_latent[jaw_y0:jaw_y1, :].copy()
-        if jaw_region.shape[0] > 10:
-            jh, jw = jaw_region.shape[:2]
-            shift_dx = int(w * 0.038 * intensity)
-            shift_dy = int(h * 0.044 * intensity)
+        jaw_y0, jaw_y1 = int(h * 0.45), int(h * 0.85)
+        if (jaw_y1 - jaw_y0) > 10:
+            shift_dx = int(w * 0.032 * intensity)
+            shift_dy = int(h * 0.038 * intensity)
             M_jaw = np.float32([[1, 0, shift_dx], [0, 1, shift_dy]])
-            jaw_warped = cv2.warpAffine(jaw_region, M_jaw, (jw, jh), borderMode=cv2.BORDER_REFLECT)
-            
-            Y, X = np.ogrid[:jh, :jw]
-            j_mask = np.clip(1.0 - np.sqrt(((X - jw//2)/(jw * 0.38))**2 + ((Y - int(jh * 0.5))/(jh * 0.45))**2), 0, 1)
-            j_mask = cv2.GaussianBlur(j_mask, (25, 25), 0)[:, :, np.newaxis]
-            
-            warped_latent[jaw_y0:jaw_y1, :] = warped_latent[jaw_y0:jaw_y1, :] * (1.0 - j_mask * 0.75 * intensity) + jaw_warped * (j_mask * 0.75 * intensity)
+            warped_jaw = cv2.warpAffine(out[jaw_y0:jaw_y1, :], M_jaw, (w, jaw_y1 - jaw_y0), borderMode=cv2.BORDER_REFLECT)
+            jaw_mask = mask_f[jaw_y0:jaw_y1, :, np.newaxis] * 0.75 * intensity
+            out[jaw_y0:jaw_y1, :] = out[jaw_y0:jaw_y1, :] * (1.0 - jaw_mask) + warped_jaw * jaw_mask
 
-        return np.clip(warped_latent, 0, 255).astype(np.uint8)
+        return np.clip(out, 0, 255).astype(np.uint8)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
