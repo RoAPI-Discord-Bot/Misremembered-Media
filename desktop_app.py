@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v3.4.0-KANE-PIXELS"
+APP_VERSION = "v3.5.0-FORGETS-PRO"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -90,11 +90,19 @@ def find_ffmpeg():
 
 FFMPEG = find_ffmpeg()
 
+NO_SIGNAL_LANGS = [
+    "Pas de signal", "Kein Signal", "Sin señal", "Nenhum sinal", "Geen signaal",
+    "No Signal", "Brak sygnału", "Není signál", "Nincs jel", "Semnal lipsă",
+    "Ingen signal", "Ei signaalia", "Sinyal yok", "Δεν υπάρχει σήμα",
+    "Нет сигнала", "Немає сигналу", "Nema signala", "Signāla nav", "Signalo nėra",
+    "无信号", "信号なし", "신호 없음", "אין אות", "لا توجد إشارة",
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. KANE PIXELS BACKROOMS AUDIO DSP ENGINE
-# Full analog tape wow & flutter, weighted memory intervals (20/45/35),
-# liminal drywall/concrete Schroeder reverb, 60Hz fluorescent buzz, and ghost echoes
+# Analog tape wow/flutter/stalls, weighted intervals (20/45/35),
+# liminal drywall/concrete Schroeder reverb, 60Hz buzz, and Green Light transformer hum
 # ─────────────────────────────────────────────────────────────────────────────
 class KanePixelsAudioDSP:
     @staticmethod
@@ -244,10 +252,42 @@ class KanePixelsAudioDSP:
         return audio + delayed
 
     @staticmethod
+    def apply_green_light_audio_surge(audio, sr=44100, duration_s=10.0, intensity=0.85):
+        """
+        Injects loud 60Hz transformer electrical buzz and sub-bass surge during Green Light events.
+        """
+        n_samples = len(audio)
+        green_event_time = duration_s * 0.45 # Trigger at 45% of video
+        event_dur = 2.4 # 2.4s duration
+        
+        idx0 = int(green_event_time * sr)
+        idx1 = min(n_samples, int((green_event_time + event_dur) * sr))
+        
+        if idx1 > idx0:
+            seg_len = idx1 - idx0
+            t = np.linspace(0, seg_len / sr, seg_len, endpoint=False)
+            # Envelope: fast rise, plateau, smooth fade out
+            env = np.sin(np.linspace(0, np.pi, seg_len)) ** 1.5
+            
+            # Sub-bass rumble + heavy 60Hz/120Hz transformer hum
+            buzz = (
+                0.60 * np.sin(2 * np.pi * 58.0 * t) +
+                0.40 * np.sin(2 * np.pi * 116.0 * t) +
+                0.25 * np.sin(2 * np.pi * 232.0 * t) +
+                0.15 * np.random.normal(0, 0.1, seg_len)
+            ) * env * (0.28 * intensity)
+            
+            audio[idx0:idx1, 0] += buzz
+            audio[idx0:idx1, 1] += buzz
+
+        return audio
+
+    @staticmethod
     def process_full_audio(audio, sr=44100, seed=12345, sliders=None):
         if sliders is None:
             sliders = {}
         master_v = sliders.get("master_val", 85) / 100.0
+        green_v  = sliders.get("green_shift", 60) / 100.0
         
         # Ensure float32 stereo (-1.0 to 1.0)
         if audio.dtype == np.int16:
@@ -260,7 +300,9 @@ class KanePixelsAudioDSP:
         if audio_f.ndim == 1:
             audio_f = np.column_stack((audio_f, audio_f))
 
-        dbg(f"Audio DSP: Warping {len(audio_f)/sr:.1f}s audio track with Kane Pixels parameters...", "AUDIO")
+        duration_s = len(audio_f) / float(sr)
+        dbg(f"Audio DSP: Processing {duration_s:.1f}s audio track with Kane Pixels parameters...", "AUDIO")
+
         # 1. Analog tape warping with weighted pitch intervals & stalls
         warped = KanePixelsAudioDSP.apply_tape_warp(audio_f, sr=sr, seed=seed, intensity=master_v)
 
@@ -274,7 +316,11 @@ class KanePixelsAudioDSP:
         hum = KanePixelsAudioDSP.synthesize_fluorescent_hum(len(with_echo), sr=sr, gain=0.030 * master_v)
         mixed = with_echo + hum
 
-        # 5. Camcorder AGC & soft saturation limiter (prevent clipping)
+        # 5. Green Light Complex loud electrical hum surge
+        if green_v > 0.10:
+            mixed = KanePixelsAudioDSP.apply_green_light_audio_surge(mixed, sr=sr, duration_s=duration_s, intensity=green_v * master_v)
+
+        # 6. Camcorder AGC & soft saturation limiter (prevent clipping)
         saturated = np.tanh(mixed * 1.15) / 1.15
         
         # Convert back to int16
@@ -284,15 +330,19 @@ class KanePixelsAudioDSP:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. DYNAMIC ON-FRAME TEXT CORRUPTOR & TEMPORAL SLIP ENGINE
-# Blends in normally 75-80% of the time, occasionally spazzes out into misremembered fonts/backgrounds
+# 2. KANE PIXELS "FORGETS / STILL LIFE" TEXT CORRUPTOR
+# Full implementation of the 5 authentic Kane Pixels text corruption modes:
+# - Inpainted box & phonetic duplicate overlay (Ref 1)
+# - Vertical barcode smear / dripping lines (Ref 5)
+# - In-place razor glyph serration (Ref 3)
+# - Horizontal bisect & inverted mirror fold (Ref 4)
+# - Angled ghost trailing & offset layers (Ref 2)
 # ─────────────────────────────────────────────────────────────────────────────
 class LocalGlyphCorruptor:
     @staticmethod
     def generate_phonetic_mutation(word_len, rng):
-        """Generates dynamic phonetic pseudo-word strings matching the length/structure."""
         vowels = ['a', 'e', 'i', 'o', 'u', 'ea', 'oe', 'ai']
-        consonants = ['b', 'c', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'v', 'w', 'sh', 'th', 'ch', 'bl']
+        consonants = ['b', 'c', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'v', 'w', 'sh', 'th', 'ch', 'bl', 'st', 'cl']
         res = []
         is_vow = rng.random() < 0.3
         while len("".join(res)) < word_len:
@@ -306,52 +356,25 @@ class LocalGlyphCorruptor:
 
     @staticmethod
     def corrupt_actual_frame_text(bgr_img, rng, intensity=0.85, frame_idx=0, fps=30.0):
-        """
-        Sporadic / temporal slip text corruption:
-        - Most of the time (~78%), text blends in untouched like the original video.
-        - In periodic 1.6s - 2.2s slip windows, it spazes out with misremembered fonts/backgrounds.
-        """
-        # Calculate temporal slip window state
-        is_video = (fps > 0 and frame_idx >= 0)
-        t_sec = frame_idx / max(1.0, fps) if is_video else 0.0
-
-        if is_video:
-            # Cycle every ~8.0 seconds: first 6.2s normal (blends in), last 1.8s glitch slip
-            cycle_period = 8.0
-            slip_duration = 1.8
-            t_in_cycle = t_sec % cycle_period
-            is_slip_active = (t_in_cycle >= (cycle_period - slip_duration))
-
-            if not is_slip_active:
-                # Normal reality — text blends in untouched with the video!
-                return bgr_img
-            
-            # During slip: lock pseudo-words to the current window ID so text stays stable & readable
-            window_id = int(t_sec / cycle_period)
-            slip_rng = random.Random(rng.randint(0, 0xFFFF) + window_id * 9973)
-        else:
-            # Static image mode: apply slip cleanly to 1 or 2 text boxes
-            slip_rng = rng
-
         h, w = bgr_img.shape[:2]
         gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
         
-        # Gradient text region isolation
+        # Fast Sobel gradient text region detector
         grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (12, 3)))
         grad_norm = cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        _, thresh = cv2.threshold(grad_norm, 60, 255, cv2.THRESH_BINARY)
+        _, thresh = cv2.threshold(grad_norm, 55, 255, cv2.THRESH_BINARY)
         connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (16, 6)))
         contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        pil_img = Image.fromarray(cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB))
+        out = bgr_img.copy()
+        pil_img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil_img)
-        res_cv = bgr_img.copy()
 
         corrupted_count = 0
-        max_corrupt = 4 if is_video else 2
+        max_corrupt = 6
 
         for cnt in contours:
             if corrupted_count >= max_corrupt:
@@ -361,69 +384,106 @@ class LocalGlyphCorruptor:
             aspect = bw / float(max(1, bh))
             area = bw * bh
 
-            if 30 < bw < w * 0.92 and 12 < bh < h * 0.35 and aspect > 1.2 and area > 400:
-                if slip_rng.random() > intensity:
+            if 25 < bw < w * 0.95 and 10 < bh < h * 0.40 and aspect > 1.1 and area > 350:
+                if rng.random() > intensity:
                     continue
 
                 roi = gray[y:y+bh, x:x+bw]
-                mean_lum = np.mean(roi)
-                is_white_bg = mean_lum > 140
+                is_white_bg = np.mean(roi) > 135
 
-                mode = slip_rng.random()
+                # 5 Authentic Modes based on reference images
+                effect_mode = rng.choice([
+                    'box_overlay', 'vertical_barcode_melt', 'glyph_serration', 
+                    'bisect_mirror', 'angled_ghost'
+                ])
 
-                if mode < 0.55:
-                    # ── DYNAMIC FONT REPLACEMENT WITH CLEAN BACKGROUND (MEME STYLE) ──
-                    bg_col = (255, 255, 255) if is_white_bg else (15, 15, 15)
+                # ── MODE 1: Inpainted Box & Phonetic Mutation (Ref 1) ──
+                # Duplicates text in-place with sharp rectangular background box matching font/colors
+                if effect_mode == 'box_overlay':
+                    bg_col = (255, 255, 255) if is_white_bg else (10, 10, 10)
                     fg_col = (10, 10, 10) if is_white_bg else (245, 245, 245)
+                    
+                    ox = x + rng.randint(-int(bw*0.06), int(bw*0.06))
+                    oy = y + rng.randint(-int(bh*0.12), int(bh*0.12))
+                    draw.rectangle([ox, oy, ox + bw, oy + bh], fill=bg_col)
 
-                    draw.rectangle([x, y, x + bw, y + bh], fill=bg_col)
-
-                    # Estimate approximate word count based on width/height
-                    est_words = max(1, bw // int(bh * 1.8))
-                    pseudo_words = [LocalGlyphCorruptor.generate_phonetic_mutation(slip_rng.randint(3, 7), slip_rng) for _ in range(est_words)]
-                    text_str = " ".join(pseudo_words)
-                    if is_white_bg and slip_rng.random() < 0.35:
-                        text_str += "."
-
-                    f_size = max(12, int(bh * 0.65))
+                    est_words = max(1, bw // int(bh * 1.7))
+                    words = [LocalGlyphCorruptor.generate_phonetic_mutation(rng.randint(3, 7), rng) for _ in range(est_words)]
+                    text_str = " ".join(words)
+                    f_size = max(11, int(bh * 0.68))
                     try:
                         font = ImageFont.truetype("arial.ttf", f_size)
                     except Exception:
                         font = ImageFont.load_default()
-
-                    tx = x + slip_rng.randint(2, max(4, int(bw * 0.04)))
-                    ty = y + max(1, int((bh - f_size) / 2))
-                    if not is_white_bg:
-                        draw.text((tx+1, ty+1), text_str, fill=(0, 0, 0), font=font)
-                    draw.text((tx, ty), text_str, fill=fg_col, font=font)
+                    draw.text((ox + 4, oy + max(1, int((bh - f_size)/2))), text_str, fill=fg_col, font=font)
                     corrupted_count += 1
 
-                else:
-                    # ── IN-PLACE CHARACTER FLIP / CASCADE ──
-                    text_patch = res_cv[y:y+bh, x:x+bw].copy()
-                    if text_patch.size == 0:
-                        continue
+                # ── MODE 2: Vertical Barcode Smear / Dripping Lines (Ref 5) ──
+                # Extrudes letter strokes straight downwards into dripping barcode lines
+                elif effect_mode == 'vertical_barcode_melt':
+                    patch = out[y:y+bh, x:x+bw].copy()
+                    if patch.size > 0:
+                        drip_len = rng.randint(int(bh * 1.5), int(bh * 3.5))
+                        bottom_row = patch[-2:, :, :]
+                        drip_block = np.repeat(bottom_row[-1:, :, :], drip_len, axis=0)
+                        y_end = min(h, y + bh + drip_len)
+                        act_len = y_end - (y + bh)
+                        if act_len > 0:
+                            out[y+bh:y_end, x:x+bw] = drip_block[:act_len, :]
+                            corrupted_count += 1
 
-                    char_w = max(6, int(bh * 0.75))
-                    if bw > char_w * 2:
-                        cx = slip_rng.randint(0, bw - char_w)
-                        char_slice = text_patch[:, cx:cx+char_w].copy()
-                        flipped = cv2.flip(char_slice, 1)
-                        text_patch[:, cx:cx+char_w] = cv2.addWeighted(flipped, 0.95, text_patch[:, cx:cx+char_w], 0.05, 0)
-                        
-                        patch_rgb = Image.fromarray(cv2.cvtColor(text_patch, cv2.COLOR_BGR2RGB))
-                        pil_img.paste(patch_rgb, (x, y))
+                # ── MODE 3: In-Place Razor Glyph Serration & Vertical Slicing (Ref 3) ──
+                # Slices letters into thin vertical razor columns shifted up/down
+                elif effect_mode == 'glyph_serration':
+                    patch = out[y:y+bh, x:x+bw].copy()
+                    if patch.size > 0:
+                        strip_w = max(2, int(bh * 0.18))
+                        for sx in range(0, bw, strip_w * 2):
+                            ex = min(bw, sx + strip_w)
+                            shift = rng.choice([-1, 1]) * rng.randint(2, max(3, int(bh * 0.25)))
+                            M = np.float32([[1, 0, 0], [0, 1, shift]])
+                            patch[:, sx:ex] = cv2.warpAffine(patch[:, sx:ex], M, (ex - sx, bh), borderMode=cv2.BORDER_REFLECT)
+                        out[y:y+bh, x:x+bw] = patch
                         corrupted_count += 1
 
-        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                # ── MODE 4: Horizontal Bisect & Inverted Mirror Fold (Ref 4) ──
+                # Cuts line horizontally and flips bottom half upside down & backwards
+                elif effect_mode == 'bisect_mirror':
+                    patch = out[y:y+bh, x:x+bw].copy()
+                    if patch.size > 0:
+                        half_h = bh // 2
+                        if half_h > 2:
+                            flipped_lower = cv2.flip(patch[half_h:, :], -1)
+                            patch[half_h:, :] = cv2.addWeighted(flipped_lower, 0.85, patch[half_h:, :], 0.15, 0)
+                            bar_h = max(2, int(bh * 0.10))
+                            patch[half_h-bar_h//2:half_h+bar_h//2, :] = 0
+                            out[y:y+bh, x:x+bw] = patch
+                            corrupted_count += 1
+
+                # ── MODE 5: Angled Ghost Trailing & Offset Layers (Ref 2) ──
+                # Creates semi-transparent duplicated layers drifting at an angle ("Ask Still Life")
+                elif effect_mode == 'angled_ghost':
+                    patch = out[y:y+bh, x:x+bw].copy()
+                    if patch.size > 0:
+                        shift_x = rng.choice([-1, 1]) * rng.randint(3, max(5, int(bw * 0.08)))
+                        shift_y = rng.choice([-1, 1]) * rng.randint(2, max(4, int(bh * 0.22)))
+                        M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+                        ghost = cv2.warpAffine(patch, M, (bw, bh), borderMode=cv2.BORDER_REFLECT)
+                        out[y:y+bh, x:x+bw] = cv2.addWeighted(out[y:y+bh, x:x+bw], 0.55, ghost, 0.45, 0)
+                        corrupted_count += 1
+
+        pil_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        return cv2.addWeighted(out, 0.5, pil_bgr, 0.5, 0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. LOCAL STILL LIFE & LATENT NEURAL RECONSTRUCTION ENGINE
+# 3. STILL LIFE ANATOMICAL RECONSTRUCTION ENGINE
+# Note: Deterministic Computer Vision pipeline (YCrCb segmentation,
+# high-frequency specular flesh shading, asymmetric ocular drift, multi-jaw warp)
 # ─────────────────────────────────────────────────────────────────────────────
-class LocalStillLifeAIEngine:
+class LocalStillLifeEngine:
     @staticmethod
-    def apply_local_neural_reconstruction(bgr_img, rng, intensity=0.85, gloss=0.75):
+    def apply_still_life_reconstruction(bgr_img, rng, intensity=0.85, gloss=0.75):
         h, w = bgr_img.shape[:2]
         res = bgr_img.copy().astype(np.float32)
 
@@ -438,7 +498,6 @@ class LocalStillLifeAIEngine:
             skin_mask = np.clip(255 - (dist_from_center / (max(w, h) * 0.45) * 255), 0, 255).astype(np.uint8)
 
         mask_blur = cv2.GaussianBlur(skin_mask, (25, 25), 0).astype(np.float32) / 255.0
-        mask_3d = np.repeat(mask_blur[:, :, np.newaxis], 3, axis=2)
 
         # 2. Wet Flesh & Specular Shading (High-contrast gloss)
         if gloss > 0.05:
@@ -493,42 +552,173 @@ class LocalStillLifeAIEngine:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. MASTER COMPOSITE ENGINE
+# Green Light time pause + electric cracks, visual interrupts, and Forgets corruption
 # ─────────────────────────────────────────────────────────────────────────────
 class MisrememberedEngine:
     def __init__(self):
         self.seed = random.randint(0, 0xFFFFFFFF)
-        self.use_local_ai = True
+        self.use_still_life = True
+        self.frozen_green_frame = None
 
     def set_seed(self, seed_val):
         self.seed = seed_val
 
+    def generate_green_light_cracks(self, w, h, progress, rng, origin=None):
+        """Branching phosphorescent green electric cracks (The Complex Green Light)."""
+        overlay = np.zeros((h, w, 3), dtype=np.uint8)
+        if origin is None:
+            origin = (int(w * 0.48), int(h * 0.42))
+        
+        ox, oy = origin
+        n_branches = 8
+        branch_rng = random.Random(rng.randint(0, 0xFFFF))
+        
+        for b in range(n_branches):
+            angle = (b / float(n_branches)) * 2 * np.pi + branch_rng.uniform(-0.25, 0.25)
+            max_dist = np.sqrt(w**2 + h**2) * 0.80 * progress
+            cur_x, cur_y = float(ox), float(oy)
+            step_len = max(6, int(w * 0.020))
+            
+            points = [(int(cur_x), int(cur_y))]
+            dist_traveled = 0.0
+            
+            while dist_traveled < max_dist:
+                cur_angle = angle + branch_rng.uniform(-0.60, 0.60)
+                cur_x += np.cos(cur_angle) * step_len
+                cur_y += np.sin(cur_angle) * step_len
+                dist_traveled += step_len
+                
+                if 0 <= int(cur_x) < w and 0 <= int(cur_y) < h:
+                    points.append((int(cur_x), int(cur_y)))
+                else:
+                    break
+                    
+                if branch_rng.random() < 0.25 and len(points) > 2:
+                    fork_angle = cur_angle + branch_rng.choice([-0.75, 0.75])
+                    fx, fy = cur_x, cur_y
+                    fork_pts = [(int(fx), int(fy))]
+                    for _ in range(branch_rng.randint(3, 8)):
+                        fx += np.cos(fork_angle + branch_rng.uniform(-0.35, 0.35)) * (step_len * 0.7)
+                        fy += np.sin(fork_angle + branch_rng.uniform(-0.35, 0.35)) * (step_len * 0.7)
+                        if 0 <= int(fx) < w and 0 <= int(fy) < h:
+                            fork_pts.append((int(fx), int(fy)))
+                    if len(fork_pts) > 1:
+                        cv2.polylines(overlay, [np.array(fork_pts)], False, (20, 180, 40), 2, cv2.LINE_AA)
+                        cv2.polylines(overlay, [np.array(fork_pts)], False, (140, 255, 180), 1, cv2.LINE_AA)
+
+            if len(points) > 1:
+                cv2.polylines(overlay, [np.array(points)], False, (10, 160, 30), 4, cv2.LINE_AA)
+                cv2.polylines(overlay, [np.array(points)], False, (60, 240, 90), 2, cv2.LINE_AA)
+                cv2.polylines(overlay, [np.array(points)], False, (220, 255, 230), 1, cv2.LINE_AA)
+
+        # Ambient phosphorescent green illumination surge
+        Y, X = np.ogrid[:h, :w]
+        dist = np.sqrt((X - ox)**2 + (Y - oy)**2)
+        glow_radius = max(w, h) * 0.70
+        glow_intensity = np.clip(1.0 - (dist / glow_radius), 0, 1) ** 2 * 0.75 * progress
+        glow_layer = np.zeros((h, w, 3), dtype=np.float32)
+        glow_layer[:, :, 0] = glow_intensity * 35   # Blue
+        glow_layer[:, :, 1] = glow_intensity * 230  # Green
+        glow_layer[:, :, 2] = glow_intensity * 45   # Red
+        
+        return cv2.add(overlay, np.clip(glow_layer, 0, 255).astype(np.uint8))
+
+    def render_no_signal_screen(self, width, height, lang):
+        img = np.full((height, width, 3), (170, 10, 10), dtype=np.uint8) # Dark blue background
+        noise = np.random.randint(-25, 25, (height, width, 3), dtype=np.int16)
+        img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        img[::2, :, :] = (img[::2, :, :] * 0.70).astype(np.uint8)
+        
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = max(0.65, width / 550.0)
+        thick = max(1, int(scale * 2))
+        (tw, th), _ = cv2.getTextSize(lang, font, scale, thick)
+        tx = (width - tw) // 2
+        ty = (height + th) // 2
+        
+        # Text shadow and bright white foreground
+        cv2.putText(img, lang, (tx+2, ty+2), font, scale, (0, 0, 30), thick+2, cv2.LINE_AA)
+        cv2.putText(img, lang, (tx, ty), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+        return img
+
+    def render_static_screen(self, width, height):
+        small = np.random.randint(0, 256, (max(1, height // 3), max(1, width // 3)), dtype=np.uint8)
+        bgr = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
+        return cv2.resize(bgr, (width, height), interpolation=cv2.INTER_NEAREST)
+
+    def render_no_video_screen(self, width, height):
+        res = np.zeros((height, width, 3), dtype=np.uint8)
+        res[::3, :, :] = 12
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = max(0.65, width / 650.0)
+        cv2.putText(res, "PLAY >", (32, 54), font, scale, (34, 238, 232), 2, cv2.LINE_AA)
+        cv2.putText(res, "NO VIDEO", (32, 98), font, scale, (34, 238, 232), 2, cv2.LINE_AA)
+        return res
+
     def process_frame(self, frame, rng, sliders, frame_idx=0, fps=30.0):
+        h, w = frame.shape[:2]
         master_v = sliders.get("master_val", 85) / 100.0
         text_v   = sliders.get("poster_melt", 90) / 100.0
         still_v  = sliders.get("object_melt", 85) / 100.0
         gloss_v  = sliders.get("flesh_gloss", 75) / 100.0
         green_v  = sliders.get("green_shift", 60) / 100.0
 
+        is_video = (fps > 0 and frame_idx >= 0)
+        t_sec = frame_idx / max(1.0, fps) if is_video else 0.0
+
+        # ── 1. VISUAL INTERRUPT EVENTS (no_signal / no_video / static) ──
+        if is_video and master_v > 0.30:
+            cycle_time = t_sec % 18.0
+            # Sporadic 0.4s static snow burst
+            if 6.8 <= cycle_time < 7.2:
+                return self.render_static_screen(w, h)
+            # Sporadic 0.8s No Signal event
+            elif 13.5 <= cycle_time < 14.3:
+                lang = NO_SIGNAL_LANGS[(self.seed + int(t_sec / 18.0)) % len(NO_SIGNAL_LANGS)]
+                return self.render_no_signal_screen(w, h, lang)
+            # Sporadic 0.5s No Video OSD
+            elif 17.5 <= cycle_time < 18.0:
+                return self.render_no_video_screen(w, h)
+
+        # ── 2. THE GREEN LIGHT EVENT (Spatial Pause + Branching Electric Cracks) ──
+        if green_v > 0.10 and is_video:
+            green_cycle = t_sec % 22.0
+            green_start = 9.0
+            green_dur = 2.4
+            
+            if green_start <= green_cycle < (green_start + green_dur):
+                dt = green_cycle - green_start
+                # Phase 1 & 2: Pause video on frozen frame & expand electric cracks
+                if self.frozen_green_frame is None or dt < 0.1:
+                    self.frozen_green_frame = frame.copy()
+
+                out_base = self.frozen_green_frame.copy() if dt < 1.3 else frame.copy()
+                
+                # Crack progress: expand from 0.0 to 1.0, then fade out
+                if dt < 1.3:
+                    prog = dt / 1.3
+                    cracks = self.generate_green_light_cracks(w, h, prog, rng)
+                    return cv2.add(out_base, cracks)
+                else:
+                    fade = 1.0 - ((dt - 1.3) / 1.1)
+                    cracks = self.generate_green_light_cracks(w, h, fade, rng)
+                    return cv2.add(out_base, cracks)
+            else:
+                self.frozen_green_frame = None
+
         out = frame.copy()
 
-        # 1. Local AI Still Life Anatomical & Latent Reconstruction
-        if self.use_local_ai and still_v > 0.05:
-            out = LocalStillLifeAIEngine.apply_local_neural_reconstruction(
+        # ── 3. STILL LIFE ANATOMICAL RECONSTRUCTION ──
+        if self.use_still_life and still_v > 0.05:
+            out = LocalStillLifeEngine.apply_still_life_reconstruction(
                 out, rng, intensity=still_v * master_v, gloss=gloss_v
             )
 
-        # 2. Dynamic On-Frame Text Corruption (Fonts & Background Inpainting)
+        # ── 4. KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE ──
         if text_v > 0.05:
             out = LocalGlyphCorruptor.corrupt_actual_frame_text(
                 out, rng, intensity=text_v * master_v, frame_idx=frame_idx, fps=fps
             )
-
-        # 3. The Complex "Green Light" Subtle Shift
-        if green_v > 0.10 and rng.random() < 0.35:
-            green_surge = green_v * master_v
-            green_overlay = np.zeros_like(out)
-            green_overlay[:, :] = [int(8 * green_surge), int(26 * green_surge), int(6 * green_surge)]
-            out = cv2.add(out, green_overlay)
 
         return out
 
@@ -539,7 +729,7 @@ class MisrememberedEngine:
 class MisrememberedDesktopApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("MISREMEMBERED MEDIA // KANE PIXELS RECONSTRUCTION TERMINAL")
+        self.title("MISREMEMBERED MEDIA // FORGETS & STILL LIFE TERMINAL")
         self.geometry("1340x880")
         self.minsize(1080, 720)
         self.configure(fg_color="#07080b")
@@ -608,14 +798,14 @@ class MisrememberedDesktopApp(ctk.CTk):
         seed_box = ctk.CTkFrame(self.header, fg_color="transparent")
         seed_box.pack(side="right", padx=20, pady=12)
 
-        # Built-in Local AI Switch
-        self.ai_switch = ctk.CTkSwitch(
-            seed_box, text="LOCAL AI ENGINE", font=ctk.CTkFont(family="Courier New", size=11, weight="bold"),
+        # Still Life Engine Switch
+        self.still_life_switch = ctk.CTkSwitch(
+            seed_box, text="STILL LIFE RECONSTRUCTION", font=ctk.CTkFont(family="Courier New", size=11, weight="bold"),
             progress_color="#00ff66", button_color="#ffffff", text_color="#00ff66",
-            command=self.toggle_local_ai
+            command=self.toggle_still_life
         )
-        self.ai_switch.select()
-        self.ai_switch.pack(side="left", padx=14)
+        self.still_life_switch.select()
+        self.still_life_switch.pack(side="left", padx=14)
 
         self.seed_btn = ctk.CTkButton(seed_box, text="↻ RE-SEED", font=ctk.CTkFont(family="Courier New", size=11), width=90, height=28, fg_color="#181a20", hover_color="#262a36", border_width=1, border_color="#2e3444", text_color="#00ff66", command=self.re_seed)
         self.seed_btn.pack(side="left", padx=6)
@@ -648,8 +838,8 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.tab_anatomy = self.tabs.add("STILL LIFE")
-        self.tab_text = self.tabs.add("TEXT CORRUPTOR")
-        self.tab_audio = self.tabs.add("KANE AUDIO DSP")
+        self.tab_text = self.tabs.add("FORGETS TEXT")
+        self.tab_audio = self.tabs.add("KANE AUDIO")
 
         self.setup_tabs()
 
@@ -693,13 +883,13 @@ class MisrememberedDesktopApp(ctk.CTk):
             ("Uncanny Still Life Drift", "object_melt", 0, 100, 85, "#ff3344"),
             ("Wet Flesh Specular Shading", "flesh_gloss", 0, 100, 75, "#00ff66"),
             ("Asymmetric Ocular Shift", "master_val", 0, 100, 90, "#ff3344"),
-            ("The Complex 'Green Light'", "green_shift", 0, 100, 60, "#00ff66"),
+            ("The Green Light Pause & Cracks", "green_shift", 0, 100, 70, "#00ff66"),
         ]
         for title, key, mn, mx, df, clr in sliders_1:
             self._make_slider_group(self.tab_anatomy, title, key, mn, mx, df, clr)
 
         sliders_2 = [
-            ("On-Frame Glyph Corruption", "poster_melt", 0, 100, 85, "#ff3344"),
+            ("Forgets Glyph Corruption Intensity", "poster_melt", 0, 100, 90, "#ff3344"),
         ]
         for title, key, mn, mx, df, clr in sliders_2:
             self._make_slider_group(self.tab_text, title, key, mn, mx, df, clr)
@@ -731,11 +921,11 @@ class MisrememberedDesktopApp(ctk.CTk):
     def get_sliders(self):
         return {k: int(v.get()) for k, v in self.slider_vars.items()}
 
-    def toggle_local_ai(self):
-        self.engine.use_local_ai = self.ai_switch.get() == 1
-        state = "ENABLED" if self.engine.use_local_ai else "DISABLED"
-        self.add_log(f"Local AI Still Life Engine {state}", "info")
-        dbg(f"Local AI Engine toggled: {state}", "AI")
+    def toggle_still_life(self):
+        self.engine.use_still_life = self.still_life_switch.get() == 1
+        state = "ENABLED" if self.engine.use_still_life else "DISABLED"
+        self.add_log(f"Still Life Reconstruction Engine {state}", "info")
+        dbg(f"Still Life Engine toggled: {state}", "STILL_LIFE")
         self.refresh_preview()
 
     def add_log(self, msg, level="info"):
@@ -823,7 +1013,6 @@ class MisrememberedDesktopApp(ctk.CTk):
                 continue
 
             sliders = self.get_sliders()
-            # Identical deterministic temporal seed used in BOTH preview and export
             frame_rng = random.Random(self.engine.seed + int(frame_idx / (fps * 2.0)))
             out = self.engine.process_frame(frame, frame_rng, sliders, frame_idx, fps)
             
@@ -857,20 +1046,20 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_bar.pack(side="bottom", fill="x")
 
-        # Snapshot all state on the main thread
-        _snap_sliders = self.get_sliders()
-        _snap_ai      = self.engine.use_local_ai
-        _snap_seed    = self.engine.seed
-        _snap_path    = self.current_media_path
-        dbg(f'Export initiated — seed={_snap_seed:08X} ai={_snap_ai} sliders={_snap_sliders}', 'EXPORT')
+        # Snapshot all state on main thread before spawning
+        _snap_sliders   = self.get_sliders()
+        _snap_still_life = self.engine.use_still_life
+        _snap_seed      = self.engine.seed
+        _snap_path      = self.current_media_path
+        dbg(f'Export initiated — seed={_snap_seed:08X} still_life={_snap_still_life} sliders={_snap_sliders}', 'EXPORT')
 
         threading.Thread(
             target=self.export_video_thread,
-            args=(_snap_sliders, _snap_ai, _snap_seed, _snap_path),
+            args=(_snap_sliders, _snap_still_life, _snap_seed, _snap_path),
             daemon=True
         ).start()
 
-    def export_video_thread(self, sliders, use_local_ai, seed, in_path):
+    def export_video_thread(self, sliders, use_still_life, seed, in_path):
         temp_video = None
         temp_in_wav = None
         temp_out_wav = None
@@ -888,7 +1077,6 @@ class MisrememberedDesktopApp(ctk.CTk):
             orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 300
 
-            # Turbo Encoding Optimization: Cap max dimension to 1280px for export speed
             target_w, target_h = orig_w, orig_h
             if orig_w > 1280:
                 target_w = 1280
@@ -913,10 +1101,10 @@ class MisrememberedDesktopApp(ctk.CTk):
 
                 # Identical deterministic temporal seed ensures 100% parity with preview!
                 frame_rng = random.Random(seed + int(frame_idx / (fps * 2.0)))
-                _orig_ai = self.engine.use_local_ai
-                self.engine.use_local_ai = use_local_ai
+                _orig_sl = self.engine.use_still_life
+                self.engine.use_still_life = use_still_life
                 out = self.engine.process_frame(frame, frame_rng, sliders, frame_idx, fps)
-                self.engine.use_local_ai = _orig_ai
+                self.engine.use_still_life = _orig_sl
                 writer.write(out)
                 frame_idx += 1
 
@@ -937,7 +1125,6 @@ class MisrememberedDesktopApp(ctk.CTk):
             # ── AUDIO PROCESSING WITH KANE PIXELS DSP ──
             if FFMPEG:
                 self.add_log("Processing Backrooms audio DSP (tape wow, liminal reverb, fluorescent hum)...", "info")
-                # 1. Extract audio track
                 ext_cmd = [FFMPEG, "-y", "-i", in_path, "-vn", "-ac", "2", "-ar", "44100", temp_in_wav]
                 subprocess.run(ext_cmd, capture_output=True, timeout=60)
 
@@ -953,7 +1140,6 @@ class MisrememberedDesktopApp(ctk.CTk):
                         has_audio = False
 
                 if not has_audio:
-                    # Generate authentic Backrooms atmosphere / fluorescent drone for silent media
                     sr = 44100
                     duration_s = max(1.0, total_frames / float(fps))
                     n_samples = int(sr * duration_s)
@@ -961,7 +1147,7 @@ class MisrememberedDesktopApp(ctk.CTk):
                     hum = KanePixelsAudioDSP.synthesize_fluorescent_hum(n_samples, sr=sr, gain=0.045)
                     wavfile.write(temp_out_wav, sr, (hum * 32767.0).astype(np.int16))
 
-                # 2. Final Remux with FFmpeg
+                # Remux with FFmpeg
                 self.add_log("Remuxing final high-fidelity video & audio payload...", "info")
                 cmd = [
                     FFMPEG, "-y",
