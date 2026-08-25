@@ -1641,71 +1641,21 @@ document.addEventListener('DOMContentLoaded', () => {
             else {
                 entity.transform.opacity = Math.max(0, entity.transform.opacity - 0.4);
                 addLog(`[ENTITY DECAY] '${entity.type}' (${entity.id}) fading to erasure (opacity: ${entity.transform.opacity.toFixed(2)})`, 'danger');
-
-                // Object Insertion: when entity is erased, insert a procedural silhouette into its region
-                if (entity.transform.opacity <= 0) {
-                    triggerObjectInsertion(entity.baseRect);
-                }
             }
         }
-    }
 
-    function triggerObjectInsertion(baseRect) {
-        const types = ['speaker_cone', 'chair_back', 'cabinet_edge', 'conduit_junction'];
-        const sType = types[Math.floor(frameRng() * types.length)];
-
-        insertedEntities.push({
-            id: 'inserted_' + Math.random().toString(36).substr(2, 7),
-            type: 'inserted',
-            silhouetteType: sType,
-            baseRect: { ...baseRect },
-            opacity: 0.1 // Starts near-invisible, ramps UP over repetitions
-        });
-        addLog(`[OBJECT INSERTION] Complex inserted procedural structure '${sType}' into erased region`, 'alert');
-    }
-
-    function renderInsertedEntitySilhouette(ctx, entity) {
-        const { x, y, w, h } = entity.baseRect;
-        ctx.save();
-        ctx.globalAlpha = Math.min(1.0, entity.opacity);
-        ctx.strokeStyle = 'rgba(45, 38, 24, 0.85)';
-        ctx.fillStyle = 'rgba(28, 24, 16, 0.70)';
-        ctx.lineWidth = 2;
-
-        const cx = x + w / 2;
-        const cy = y + h / 2;
-
-        if (entity.silhouetteType === 'speaker_cone') {
-            const radius = Math.min(w, h) * 0.4;
-            ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-            ctx.beginPath(); ctx.arc(cx, cy, radius * 0.5, 0, Math.PI * 2); ctx.stroke();
-            ctx.beginPath(); ctx.arc(cx, cy, radius * 0.2, 0, Math.PI * 2); ctx.fillStyle = '#0a0a0a'; ctx.fill();
-        } else if (entity.silhouetteType === 'chair_back') {
-            ctx.beginPath();
-            ctx.rect(x + w * 0.15, y + h * 0.1, w * 0.7, h * 0.8);
-            ctx.fill(); ctx.stroke();
-            const numSlats = 3;
-            for (let i = 1; i <= numSlats; i++) {
-                const sx = x + w * 0.15 + (w * 0.7 * (i / (numSlats + 1)));
-                ctx.beginPath(); ctx.moveTo(sx, y + h * 0.2); ctx.lineTo(sx, y + h * 0.7); ctx.stroke();
+        // Also mutate 1-2 detected word entities permanently during decay cycle
+        if (detectedWordEntities.length > 0) {
+            const unmutatedWords = detectedWordEntities.filter(wrd => !wrd.mutation);
+            if (unmutatedWords.length > 0) {
+                const pickWord = unmutatedWords[Math.floor(frameRng() * unmutatedWords.length)];
+                mutateWordEntity(pickWord, glitchCanvas.width || 800, glitchCanvas.height || 600);
             }
-        } else if (entity.silhouetteType === 'cabinet_edge') {
-            ctx.beginPath(); ctx.rect(x, y, w, h); ctx.fill(); ctx.stroke();
-            ctx.beginPath(); ctx.rect(x + 4, y + 4, w - 8, h - 8); ctx.stroke();
-            ctx.fillStyle = '#665533';
-            ctx.fillRect(x + 6, y + 8, 4, 4);
-            ctx.fillRect(x + 6, y + h - 12, 4, 4);
-        } else {
-            ctx.beginPath(); ctx.rect(cx - 6, y, 12, h); ctx.fill(); ctx.stroke();
-            ctx.fillStyle = '#776644';
-            ctx.fillRect(cx - 10, y + h * 0.25, 20, 6);
-            ctx.fillRect(cx - 10, y + h * 0.75, 20, 6);
         }
-        ctx.restore();
     }
 
     function renderMemoryEntities(ctx, now) {
-        if (!memoryEntities.length && !insertedEntities.length) return;
+        if (!memoryEntities.length) return;
 
         for (const e of memoryEntities) {
             if (e.transform.opacity <= 0) continue; // Erased / fully forgotten
@@ -1749,128 +1699,90 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.restore();
             }
         }
+    }
 
-        // Render inserted procedural silhouettes
-        for (const inst of insertedEntities) {
-            if (inst.opacity < 1.0) inst.opacity = Math.min(1.0, inst.opacity + 0.05);
-            renderInsertedEntitySilhouette(ctx, inst);
+    // Assigns a permanent, non-flickering Kane Pixels "Forgets" mutation to a word
+    function mutateWordEntity(word, canvasW, canvasH) {
+        if (!word || word.mutation) return;
+        const roll = Math.random();
+
+        if (roll < 0.35) {
+            // 1. Ascending inverted floating echo ('make' -> inverted 'ɐʞɐm' floating above)
+            const floatDistance = word.h * (1.15 + Math.random() * 0.45);
+            const destX = Math.max(0, Math.min(canvasW - word.w, word.x + (Math.random() - 0.5) * 12));
+            const destY = Math.max(0, word.y - floatDistance);
+            word.mutation = {
+                type: 'floating_echo',
+                destX: destX,
+                destY: destY,
+                alpha: 0.85
+            };
+            addLog(`[TEXT MISREMEMBERED] Word '${word.originalText || word.id}' drifted into floating inverted echo`, 'alert');
+        } else if (roll < 0.70) {
+            // 2. Descending stair-step diagonal cascade ('Forgets' -> 'gets' -> 'ts')
+            const numSteps = 3;
+            const stepDx = Math.round(word.w * 0.16);
+            const stepDy = Math.round(word.h * 0.60);
+            word.mutation = {
+                type: 'cascade',
+                numSteps: numSteps,
+                stepDx: stepDx,
+                stepDy: stepDy
+            };
+            addLog(`[TEXT MISREMEMBERED] Word '${word.originalText || word.id}' cascaded into stair-step trail`, 'alert');
+        } else {
+            // 3. In-place glyph corruption / horizontal character mirror
+            const charW = Math.max(8, Math.floor(word.w / 4));
+            const charOffset = Math.floor(Math.random() * Math.max(1, word.w - charW));
+            word.mutation = {
+                type: 'glyph_flip',
+                charW: charW,
+                charOffset: charOffset,
+                alpha: 0.85
+            };
+            addLog(`[TEXT MISREMEMBERED] Word '${word.originalText || word.id}' corrupted with mirrored character glyphs`, 'alert');
         }
     }
 
-    // 1. ASCENDING FLOATING MIRRORED ECHO (e.g. 'make' -> inverted 'ɐʞɐm' floating above)
-    function applyFloatingMirroredEcho(word, canvasW, canvasH, intensity) {
-        if (!word || !word.glyphCanvas) return;
-        const floatDistance = word.h * (1.15 + (Math.random() * 0.45));
-        const destX = Math.max(0, Math.min(canvasW - word.w, word.x + (Math.random() - 0.5) * 16));
-        const destY = word.y - floatDistance;
-        if (destY < 0) return;
-
-        ctx.save();
-        ctx.globalAlpha = Math.min(0.95, 0.75 + (intensity || 0.8) * 0.2);
-        // Invert vertically & mirror horizontally so letters appear flipped upside-down and backwards
-        ctx.translate(destX + word.w / 2, destY + word.h / 2);
-        ctx.scale(-1, -1);
-        ctx.drawImage(word.glyphCanvas, -word.w / 2, -word.h / 2);
-        ctx.restore();
-    }
-
-    // 2. DESCENDING DIAGONAL CASCADE (e.g. 'Forgets' -> 'gets' -> 'ts' stair-step drop)
-    function applyForgetsTextCascade(word, canvasW, canvasH, intensity) {
-        if (!word || !word.glyphCanvas) return;
-        const numSteps = 3 + Math.floor(Math.random() * 2); // 3 to 4 steps
-        const stepDx = Math.round(word.w * 0.16); // step right
-        const stepDy = Math.round(word.h * 0.60); // step down
-
-        for (let s = 1; s <= numSteps; s++) {
-            const destX = word.x + stepDx * s;
-            const destY = word.y + stepDy * s;
-            if (destX + word.w > canvasW || destY + word.h > canvasH) continue;
-
-            const alpha = Math.max(0.08, 0.78 - s * 0.22); // 0.56, 0.34, 0.12
-
-            ctx.save();
-            ctx.globalAlpha = alpha;
-            // Progressive suffix offset: each step trims the leading character (e.g. Forgets -> gets -> ts)
-            const trimX = Math.min(word.w * 0.6, (s - 1) * (word.w / numSteps) * 0.6);
-            ctx.drawImage(
-                word.glyphCanvas,
-                trimX, 0, word.w - trimX, word.h,
-                destX + trimX, destY, word.w - trimX, word.h
-            );
-            ctx.restore();
-        }
-    }
-
-    // 3. IN-PLACE GLYPH CORRUPTION (Mirrored character overlay & Cyrillic/phonetic swaps)
-    function applyInPlaceGlyphCorruption(word, canvasW, canvasH) {
-        if (!word || !word.glyphCanvas) return;
-        // Slice a 1/3 or 1/4 character section of the word and horizontally mirror it over itself
-        const charW = Math.max(8, Math.floor(word.w / 4));
-        const charOffset = Math.floor(Math.random() * Math.max(1, word.w - charW));
-
-        ctx.save();
-        ctx.globalAlpha = 0.85;
-        ctx.translate(word.x + charOffset + charW, word.y);
-        ctx.scale(-1, 1);
-        ctx.drawImage(word.glyphCanvas, charOffset, 0, charW, word.h, 0, 0, charW, word.h);
-        ctx.restore();
-    }
-
-    // --- MISREMEMBERED TEXT GLITCH ENGINE (Pure Glyph Transformations) ---
-    function applyMisrememberedTextGlitch(w, h, intensity, now) {
-        if (!detectedWordEntities.length) {
-            scanForWordsAndGlyphs(w, h);
-        }
+    // Renders all persistent word mutations at fixed, rock-solid coordinates (Zero Flickering!)
+    function renderMisrememberedText(ctx, canvasW, canvasH) {
         if (!detectedWordEntities.length) return;
 
-        // Choose 1-3 distinct words to misremember
-        const numMutations = Math.min(detectedWordEntities.length, Math.max(1, Math.floor(2 + (intensity / 100) * 3)));
-        const shuffled = [...detectedWordEntities].sort(() => Math.random() - 0.5);
+        for (const word of detectedWordEntities) {
+            if (!word.mutation || !word.glyphCanvas) continue;
 
-        for (let i = 0; i < numMutations; i++) {
-            const word = shuffled[i];
-            if (!word) continue;
-
-            const roll = Math.random();
-            if (roll < 0.38) {
-                // Ascending inverted floating echo ('make' -> inverted above)
-                applyFloatingMirroredEcho(word, w, h, intensity / 100);
-            } else if (roll < 0.72) {
-                // Descending stair-step cascade ('Forgets' -> 'gets' descending)
-                applyForgetsTextCascade(word, w, h, intensity / 100);
-            } else {
-                // In-place glyph corruption / horizontal character mirror
-                applyInPlaceGlyphCorruption(word, w, h);
-            }
-        }
-    }
-
-    // --- BAND-LEVEL POSTER MELT (Pure Glyph Band Distortions — Zero Wallpaper Boxes) ---
-    function applyPosterBandMelt(w, h, now) {
-        if (!detectedWordEntities.length) return;
-
-        // Pick 1-2 words and apply pure glyph reflection/overlay
-        const numWords = Math.min(detectedWordEntities.length, 1 + (Math.random() < 0.35 ? 1 : 0));
-        for (let i = 0; i < numWords; i++) {
-            const word = detectedWordEntities[Math.floor(Math.random() * detectedWordEntities.length)];
-            if (!word || !word.glyphCanvas) continue;
-
-            const mode = Math.random();
-            ctx.save();
-            if (mode < 0.5) {
-                // Pure glyph horizontal mirror ghost
-                ctx.globalAlpha = 0.65 + Math.random() * 0.25;
-                ctx.translate(word.x + word.w, word.y);
+            const m = word.mutation;
+            if (m.type === 'floating_echo') {
+                ctx.save();
+                ctx.globalAlpha = m.alpha;
+                ctx.translate(m.destX + word.w / 2, m.destY + word.h / 2);
+                ctx.scale(-1, -1);
+                ctx.drawImage(word.glyphCanvas, -word.w / 2, -word.h / 2);
+                ctx.restore();
+            } else if (m.type === 'cascade') {
+                for (let s = 1; s <= m.numSteps; s++) {
+                    const destX = word.x + m.stepDx * s;
+                    const destY = word.y + m.stepDy * s;
+                    if (destX + word.w > canvasW || destY + word.h > canvasH) continue;
+                    const alpha = Math.max(0.08, 0.78 - s * 0.22);
+                    ctx.save();
+                    ctx.globalAlpha = alpha;
+                    const trimX = Math.min(word.w * 0.6, (s - 1) * (word.w / m.numSteps) * 0.6);
+                    ctx.drawImage(
+                        word.glyphCanvas,
+                        trimX, 0, word.w - trimX, word.h,
+                        destX + trimX, destY, word.w - trimX, word.h
+                    );
+                    ctx.restore();
+                }
+            } else if (m.type === 'glyph_flip') {
+                ctx.save();
+                ctx.globalAlpha = m.alpha;
+                ctx.translate(word.x + m.charOffset + m.charW, word.y);
                 ctx.scale(-1, 1);
-                ctx.drawImage(word.glyphCanvas, 0, 0);
-            } else {
-                // Pure glyph vertical flip overlay
-                ctx.globalAlpha = 0.60 + Math.random() * 0.25;
-                ctx.translate(word.x, word.y + word.h);
-                ctx.scale(1, -1);
-                ctx.drawImage(word.glyphCanvas, 0, 0);
+                ctx.drawImage(word.glyphCanvas, m.charOffset, 0, m.charW, word.h, 0, 0, m.charW, word.h);
+                ctx.restore();
             }
-            ctx.restore();
         }
     }
 
@@ -2484,20 +2396,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // --- UNCANNY ANOMALY PROCESSING (WARPING OR MEMORY DEGRADATION) ---
         if (isWarpingActive || isDegrading) {
-            // Regional Memory Drift: For rooms, hallways, wallpaper, furniture, apply subtle regional memory drift
-            const numRegions = 1 + (masterVal > 0.7 ? 1 : 0);
-            for (let ri = 0; ri < numRegions; ri++) {
-                const rw = Math.floor(w * (0.20 + Math.random() * 0.25));
-                const rh = Math.floor(h * (0.20 + Math.random() * 0.25));
-                const rx = Math.floor(Math.random() * (w - rw));
-                const ry = Math.floor(Math.random() * (h - rh));
-
-                const opRoll = (ri + Math.floor(now / 700)) % 3;
-                if (opRoll === 0) applyPixelSmearRegion(rx, ry, rw, rh, masterVal, now);
-                else if (opRoll === 1) applyTextSagRegion(rx, ry, rw, rh, masterVal, now);
-                else if (opRoll === 2 && Math.random() < 0.4) applyBlockEchoRegion(rx, ry, rw, rh, masterVal, now);
-            }
-
             if (flawedMirrorVal > 0 && frameRng() < 0.04) {
                 applyFlawedInPlaceMirroring(w, h, flawedMirrorVal, now);
                 if (pannerNode && audioCtx) {
@@ -2513,16 +2411,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // TEXT DISTORTION: scaled by masterVal when memory degrading is active
+        // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Zero Flickering, 100% Stable) ---
         if (toggleMisrememberedText && toggleMisrememberedText.checked) {
-            if (now - lastTextScanTime > 200) {
-                lastTextScanTime = now;
-                scanForTextCandidates(w, h);
-            }
-            if (masterVal > 0.05) {
-                applyMisrememberedTextGlitch(w, h, flawedMirrorVal, now);
-                if (frameRng() < 0.85 * Math.min(1.0, masterVal)) applyPosterBandMelt(w, h, now);
-            }
+            renderMisrememberedText(ctx, w, h);
         }
 
         // FINAL DEGRADATION BREAKDOWN: In the last 15% of playback, apply extreme visual+audio destruction
@@ -2833,8 +2724,13 @@ document.addEventListener('DOMContentLoaded', () => {
             scanForWordsAndGlyphs(w, h);
 
             if (toggleMisrememberedText && toggleMisrememberedText.checked && detectedWordEntities.length > 0) {
-                // Apply authentic Kane Pixels "Forgets" & Still Life text distortion (floating echo, cascade, glyph flips)
-                applyMisrememberedTextGlitch(w, h, flawedMirrorVal, performance.now());
+                // Mutate 1-3 discrete words permanently and render them
+                const numToMutate = Math.min(detectedWordEntities.length, Math.max(1, Math.floor(2 + (flawedMirrorVal / 100) * 2)));
+                const shuffled = [...detectedWordEntities].sort(() => Math.random() - 0.5);
+                for (let i = 0; i < numToMutate; i++) {
+                    mutateWordEntity(shuffled[i], w, h);
+                }
+                renderMisrememberedText(ctx, w, h);
             } else if (memoryEntities.length > 0) {
                 // Non-text environment image: apply 1-2 discrete entity memory drifts over untouched background
                 triggerEntityDecayCycle();
