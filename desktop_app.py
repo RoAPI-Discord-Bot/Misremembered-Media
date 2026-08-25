@@ -949,21 +949,23 @@ class BackroomsColorGrade:
         hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV).astype(np.float32)
 
         # Boost saturation
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 + intensity * 0.50), 0, 255)
-        # Slightly overlit value (backrooms always feels slightly overexposed)
-        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + intensity * 0.10), 0, 255)
+        # Saturation: half the original boost for a dreamier, less garish look
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 + intensity * 0.25), 0, 255)
+        # Slight value lift — dreamy softness in the midtones
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + intensity * 0.08), 0, 255)
 
         graded = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
 
-        # Color grade: suppress blue (cold), boost warm red/green
-        graded[:, :, 0] = np.clip(graded[:, :, 0] * (1.0 - intensity * 0.22), 0, 255)  # B down
-        graded[:, :, 1] = np.clip(graded[:, :, 1] * (1.0 + intensity * 0.07), 0, 255)  # G slightly up
-        graded[:, :, 2] = np.clip(graded[:, :, 2] * (1.0 + intensity * 0.14), 0, 255)  # R up (warmth)
+        # Dreamy channel balance: green & blue lowered by quarter, red neutral
+        graded[:, :, 0] = np.clip(graded[:, :, 0] * 0.75, 0, 255)   # B −25%
+        graded[:, :, 1] = np.clip(graded[:, :, 1] * 0.75, 0, 255)   # G −25%
+        # Red left untouched (neutral — no warm push, no cool push)
 
-        # Blend: only partially apply so it doesn't completely destroy the image
-        blend_amt = min(0.70, intensity * 0.75)
+        # Blend: moderate application
+        blend_amt = min(0.65, intensity * 0.70)
         out = cv2.addWeighted(bgr_img.astype(np.float32), 1.0 - blend_amt, graded, blend_amt, 0)
         return np.clip(out, 0, 255).astype(np.uint8)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1190,30 +1192,7 @@ class FaceDistortionEngine:
                 roi.astype(np.float32) * (1 - mask * blend_amt) +
                 warped.astype(np.float32) * (mask * blend_amt), 0, 255
             ).astype(np.uint8)
-
-            # YuNet face box columns 4-13 are 5 landmark points (x,y pairs):
-            # right_eye, left_eye, nose_tip, right_mouth, left_mouth
-            # Use them for precise eye flare placement if available
-            if FaceDistortionEngine._use_yunet:
-                try:
-                    # We don't have the raw detection row here, estimate from geometry
-                    # Right eye ≈ 30% from left, Left eye ≈ 70% from left, at 35% height
-                    ey_y = fy + int(fh * 0.35)
-                    for ex_frac in [0.30, 0.70]:
-                        out = FaceDistortionEngine._eye_flare(
-                            out, fx + int(fw * ex_frac), ey_y,
-                            max(3, int(fw * 0.07)), color_mode
-                        )
-                except Exception:
-                    pass
-            else:
-                # Skin fallback: estimate eyes from face geometry
-                ey_y = fy + int(fh * 0.35)
-                for ex_frac in [0.30, 0.70]:
-                    out = FaceDistortionEngine._eye_flare(
-                        out, fx + int(fw * ex_frac), ey_y,
-                        max(3, int(fw * 0.07)), color_mode
-                    )
+            # No eye flare effects
 
         return out
 
