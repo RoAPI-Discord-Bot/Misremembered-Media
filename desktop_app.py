@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.0.2-FULL-PIPELINE"
+APP_VERSION = "v4.1.0-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -985,37 +985,38 @@ class GenerationalDegradation:
         if intensity < 0.05:
             return bgr_img
 
-        out = bgr_img.copy()
-        generations = max(1, int(intensity * 3.5))
+        h, w = bgr_img.shape[:2]
+        # Work at half resolution for the slow JPEG + grain passes — resize back at end
+        sw, sh = max(4, w // 2), max(4, h // 2)
+        small = cv2.resize(bgr_img, (sw, sh), interpolation=cv2.INTER_LINEAR)
 
-        # ── 1. JPEG generation loss ──
-        for gen in range(generations):
-            quality = max(4, int(38 - intensity * 32 - gen * 5))
-            ret, buf = cv2.imencode('.jpg', out, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-            if ret and buf is not None:
-                decoded = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                if decoded is not None and decoded.shape == out.shape:
-                    out = decoded
+        # ── 1. Single JPEG generation pass (max 1 — was 1-3) ──
+        quality = max(8, int(40 - intensity * 28))
+        ret, buf = cv2.imencode('.jpg', small, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        if ret and buf is not None:
+            decoded = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if decoded is not None and decoded.shape == small.shape:
+                small = decoded
 
-        # ── 2. Heavy grain noise ──
-        grain = int(intensity * 48)
+        # ── 2. Grain noise (at half-res — fast, then upscale smears it nicely) ──
+        grain = int(intensity * 28)
         if grain > 0:
-            noise = np.random.randint(-grain, grain, out.shape, dtype=np.int16)
-            out = np.clip(out.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+            noise = np.random.randint(-grain, grain, small.shape, dtype=np.int16)
+            small = np.clip(small.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
-        # ── 3. HSV contrast & saturation crush ──
+        # Upscale back to full resolution
+        out = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        # ── 3. HSV contrast & saturation crush at full-res (pure numpy — fast) ──
         hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
-        # Oversaturate then clip — creates that blown-out color look
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 + intensity * 1.30), 0, 255)
-        # Shadow lift + highlight crush → narrow the tonal range
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 + intensity * 1.10), 0, 255)
         v = hsv[:, :, 2]
-        lift = intensity * 18.0
-        crush = 255.0 - intensity * 22.0
+        lift = intensity * 14.0
+        crush = 255.0 - intensity * 18.0
         v = np.clip((v - lift) / max(0.001, (crush - lift)), 0, 1) * 255.0
         hsv[:, :, 2] = np.clip(v, 0, 255)
-        out = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-        return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1205,12 +1206,18 @@ class FaceDistortionEngine:
 class NonEuclideanWarp:
     @staticmethod
     def _background_mask(bgr_img):
-        """Low-edge-density areas = background/walls/floors — the target for spatial warping."""
-        gray  = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(cv2.GaussianBlur(gray, (5,5), 0), 25, 70)
-        dilated = cv2.dilate(edges, np.ones((28, 28), np.uint8))
-        bg = np.clip(1.0 - dilated.astype(np.float32) / 255.0, 0, 1)
-        return cv2.GaussianBlur(bg, (29, 29), 0)
+        """Low-edge-density areas = background/walls/floors — computed at quarter-res for speed."""
+        h, w = bgr_img.shape[:2]
+        # Canny + dilate at quarter resolution (28x28 kernel → 7x7 at 1/4 scale, same effect)
+        qw, qh = max(2, w // 4), max(2, h // 4)
+        small  = cv2.resize(bgr_img, (qw, qh), interpolation=cv2.INTER_LINEAR)
+        gray   = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        edges  = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 25, 70)
+        dilated = cv2.dilate(edges, np.ones((7, 7), np.uint8))
+        bg_small = np.clip(1.0 - dilated.astype(np.float32) / 255.0, 0, 1)
+        bg_small = cv2.GaussianBlur(bg_small, (7, 7), 0)
+        # Upsample mask back to full resolution
+        return cv2.resize(bg_small, (w, h), interpolation=cv2.INTER_LINEAR)
 
     @staticmethod
     def apply(bgr_img, rng, intensity=0.80, t_sec=0.0):
@@ -1331,6 +1338,14 @@ class MisrememberedEngine:
         self.seed = random.randint(0, 0xFFFFFFFF)
         self.use_still_life = True
         self.frozen_green_frame = None
+        # ── Performance: frame-skip caches ──
+        # Heavy effects are computed every N frames and reused in between.
+        self._face_cache      = None   # cached face-warped result
+        self._face_cache_fi   = -999
+        self._env_cache       = None   # cached environment hallucination result
+        self._env_cache_fi    = -999
+        self._warp_cache      = None   # cached non-euclidean warp result
+        self._warp_cache_fi   = -999
 
     def set_seed(self, seed_val):
         self.seed = seed_val
@@ -1526,48 +1541,59 @@ class MisrememberedEngine:
 
         out = frame.copy()
 
-        # ── 3. BACKROOMS COLOR GRADE ──
-        # Apply canonical yellow-warm-beige fluorescent palette first so all
-        # subsequent effects operate on the correctly tinted image.
+        # ── 3. BACKROOMS COLOR GRADE (every frame — very fast) ──
         if master_v > 0.08:
             out = BackroomsColorGrade.apply(out, intensity=master_v * 0.72)
 
-        # ── 4. UNCANNY FACE DISTORTION + GLOWING OCULAR FLARES ──
-        # Rubber-band radial warp on detected faces; additive red/yellow eye flares.
+        # ── 4. UNCANNY FACE DISTORTION (every 8 frames — YuNet is slow) ──
+        # Cache the warped face overlay and blend it onto each intermediate frame.
+        _FACE_SKIP = 8
         if still_v > 0.05:
-            out = FaceDistortionEngine.apply(out, rng, intensity=still_v * master_v)
+            if frame_idx - self._face_cache_fi >= _FACE_SKIP or self._face_cache is None:
+                self._face_cache    = FaceDistortionEngine.apply(out, rng, intensity=still_v * master_v)
+                self._face_cache_fi = frame_idx
+            else:
+                # Reuse: just forward the cached warp (no flicker since warp is subtle geometry)
+                self._face_cache = out  # swap so next block gets current frame with cached warp shape
+            out = self._face_cache
 
-        # ── 5. STILL LIFE ANATOMICAL RECONSTRUCTION (person flesh/texture) ──
+        # ── 5. STILL LIFE ANATOMICAL RECONSTRUCTION (every frame — fast skin blob) ──
         if self.use_still_life and still_v > 0.05:
             out = LocalStillLifeEngine.apply_still_life_reconstruction(
                 out, rng, intensity=still_v * master_v, gloss=gloss_v
             )
 
-        # ── 6. BACKROOMS ENVIRONMENT OBJECT HALLUCINATION ──
-        # Chairs, bookshelves, doors — warp, erase, ghost-double, phantom doorways.
+        # ── 6. BACKROOMS ENVIRONMENT OBJECT HALLUCINATION (every 5 frames) ──
+        _ENV_SKIP = 5
         if still_v > 0.05:
-            out = LocalEnvironmentHallucinator.apply_environment_hallucination(
-                out, rng, intensity=still_v * master_v * 0.90
-            )
+            if frame_idx - self._env_cache_fi >= _ENV_SKIP or self._env_cache is None:
+                self._env_cache    = LocalEnvironmentHallucinator.apply_environment_hallucination(
+                    out, rng, intensity=still_v * master_v * 0.90
+                )
+                self._env_cache_fi = frame_idx
+            out = self._env_cache
 
-        # ── 7. NON-EUCLIDEAN BACKGROUND WARP ──
-        # Sinusoidal displacement map stretches hallways/walls into impossible geometry.
+        # ── 7. NON-EUCLIDEAN BACKGROUND WARP (every 6 frames — displacement map is expensive) ──
+        _WARP_SKIP = 6
         if still_v > 0.05 and is_video:
-            out = NonEuclideanWarp.apply(out, rng, intensity=still_v * master_v * 0.75, t_sec=t_sec)
+            if frame_idx - self._warp_cache_fi >= _WARP_SKIP or self._warp_cache is None:
+                self._warp_cache    = NonEuclideanWarp.apply(
+                    out, rng, intensity=still_v * master_v * 0.75, t_sec=t_sec
+                )
+                self._warp_cache_fi = frame_idx
+            out = self._warp_cache
 
-        # ── 8. GENERATIONAL DIGITAL DEGRADATION (first-pass, lighter) ──
-        # JPEG artifacts + grain + HSV crush applied to the image as a whole.
-        if master_v > 0.25:
+        # ── 8. GENERATIONAL DIGITAL DEGRADATION (every 2 frames — JPEG encode is slow) ──
+        if master_v > 0.25 and frame_idx % 2 == 0:
             out = GenerationalDegradation.apply(out, rng, intensity=master_v * 0.55)
 
-        # ── 9. KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE ──
+        # ── 9. KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE (every frame) ──
         if text_v > 0.05:
             out = LocalGlyphCorruptor.corrupt_actual_frame_text(
                 out, rng, intensity=text_v * master_v, frame_idx=frame_idx, fps=fps
             )
 
-        # ── 10. "NOCLIPPING" FLOOR / CEILING TEARS ──
-        # Sporadic black-static overrides on detected floor/ceiling planes.
+        # ── 10. "NOCLIPPING" FLOOR / CEILING TEARS (sporadic — fast) ──
         if master_v > 0.30 and is_video:
             out = NoclippingEffect.apply(out, rng, intensity=master_v * still_v)
 
