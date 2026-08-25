@@ -12,6 +12,8 @@ import zipfile
 import urllib.request
 import numpy as np
 import cv2
+import scipy.signal as signal
+from scipy.io import wavfile
 from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -19,53 +21,53 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v3.3.0"
-NO_SIGNAL_LANGS = [
-    "Pas de signal", "Kein Signal", "Sin señal", "Nenhum sinal", "Geen signaal",
-    "No Signal", "Brak sygnału", "Není signál", "Nincs jel", "Semnal lipsă",
-    "Ingen signal", "Ei signaalia", "Sinyal yok", "Δεν υπάρχει σήμα",
-    "Нет сигнала", "Немає сигналу", "Nema signala", "Signāla nav", "Signalo nėra",
-    "无信号", "信号なし", "신호 없음", "אין אות", "لا توجد إشارة",
-]
+APP_VERSION = "v3.4.0-KANE-PIXELS"
 
-
-# External debug terminal — writes to a live tail'd log in a separate window
-_DEBUG_LOG = os.path.join(tempfile.gettempdir(), 'misremembered_debug.log')
+# ─────────────────────────────────────────────────────────────────────────────
+# EXTERNAL DEBUG TERMINAL
+# Opens a separate PowerShell window showing live debug output in real-time.
+# ─────────────────────────────────────────────────────────────────────────────
+_DEBUG_LOG = os.path.join(tempfile.gettempdir(), "misremembered_debug.log")
 _dbg_lock = threading.Lock()
 
-def dbg(msg, tag='INFO'):
-    ts = time.strftime('%H:%M:%S.') + f'{int(time.time()*1000)%1000:03d}'
-    line = f'[{ts}] [{tag:<6}] {msg}\n'
-    print(line, end='', flush=True)
+def dbg(msg, tag="INFO"):
+    """Write a timestamped debug line to external terminal and stdout."""
+    ts = time.strftime("%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}"
+    line = f"[{ts}] [{tag:<6}] {msg}\n"
+    print(line, end="", flush=True)
     with _dbg_lock:
         try:
-            open(_DEBUG_LOG, 'a', encoding='utf-8').write(line)
+            with open(_DEBUG_LOG, "a", encoding="utf-8") as _f:
+                _f.write(line)
         except Exception:
             pass
 
 def _launch_debug_terminal():
+    """Open a separate PowerShell window that live-tails the debug log."""
     try:
-        with open(_DEBUG_LOG, 'w', encoding='utf-8') as _f:
-            _f.write(f'=== MISREMEMBERED MEDIA {APP_VERSION} DEBUG ===\n')
-            _f.write(f'=== {time.strftime(chr(37)+chr(89)+-chr(109)+-chr(100)+chr(32)+chr(37)+chr(72)+chr(58)+chr(37)+chr(77)+chr(58)+chr(37)+chr(83))} ===\n\n')
-        lp = _DEBUG_LOG.replace(chr(92), chr(92)+chr(92))
+        with open(_DEBUG_LOG, "w", encoding="utf-8") as _f:
+            _f.write(f"=== MISREMEMBERED MEDIA {APP_VERSION} LIVE DEBUG ===\n")
+            _f.write(f"=== Started: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n\n")
+        
+        lp = _DEBUG_LOG.replace("\\", "\\\\")
         ps = (
             f"$f='{lp}';$pos=0;"
-            'while($true){'
-            '$s=New-Object IO.FileStream($f,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite);'
-            '$r=New-Object IO.StreamReader($s);'
-            '$s.Seek($pos,[IO.SeekOrigin]::Begin)|Out-Null;'
-            '$t=$r.ReadToEnd();'
-            'if($t){Write-Host $t -NoNewline};'
-            '$pos=$s.Length;$r.Close();$s.Close();'
-            'Start-Sleep -Milliseconds 150}'
+            "while($true){"
+            "$s=New-Object IO.FileStream($f,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite);"
+            "$r=New-Object IO.StreamReader($s);"
+            "$s.Seek($pos,[IO.SeekOrigin]::Begin)|Out-Null;"
+            "$t=$r.ReadToEnd();"
+            "if($t){Write-Host $t -NoNewline};"
+            "$pos=$s.Length;$r.Close();$s.Close();"
+            "Start-Sleep -Milliseconds 150}"
         )
         subprocess.Popen(
-            ['powershell.exe', '-NoExit', '-Command', ps],
+            ["powershell.exe", "-NoExit", "-Command", ps],
             creationflags=subprocess.CREATE_NEW_CONSOLE
         )
+        dbg("External live debug terminal launched successfully", "INIT")
     except Exception as e:
-        print(f'[DEBUG] Terminal error: {e}', file=sys.stderr)
+        print(f"[DEBUG] Terminal error: {e}", file=sys.stderr)
 
 FFMPEG_LOCAL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "MisrememberedMedia", "ffmpeg")
 FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -90,16 +92,202 @@ FFMPEG = find_ffmpeg()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. DYNAMIC ON-FRAME TEXT CORRUPTOR & FONT RENDERER (ZERO HARDCODED WORDS)
-# Slices actual text regions, creates dynamic phonetic anagrams, and re-renders in matching font
+# 1. KANE PIXELS BACKROOMS AUDIO DSP ENGINE
+# Full analog tape wow & flutter, weighted memory intervals (20/45/35),
+# liminal drywall/concrete Schroeder reverb, 60Hz fluorescent buzz, and ghost echoes
+# ─────────────────────────────────────────────────────────────────────────────
+class KanePixelsAudioDSP:
+    @staticmethod
+    def synthesize_fluorescent_hum(n_samples, sr=44100, gain=0.032):
+        """Generates authentic Backrooms 60Hz + harmonic fluorescent light buzz."""
+        t = np.linspace(0, n_samples / sr, n_samples, endpoint=False)
+        hum = (
+            0.48 * np.sin(2 * np.pi * 60 * t) +
+            0.36 * np.sin(2 * np.pi * 120 * t) +
+            0.22 * np.sin(2 * np.pi * 180 * t) +
+            0.14 * np.sin(2 * np.pi * 240 * t) +
+            0.08 * np.sin(2 * np.pi * 360 * t) +
+            0.05 * np.sin(2 * np.pi * 480 * t)
+        )
+        mod = 0.85 + 0.15 * np.sin(2 * np.pi * 0.4 * t) + 0.08 * np.sin(2 * np.pi * 2.3 * t)
+        noise = np.random.normal(0, 0.035, n_samples)
+        out = (hum * mod + noise) * gain
+        return np.column_stack((out, out)).astype(np.float32)
+
+    @staticmethod
+    def apply_tape_warp(audio, sr=44100, seed=12345, intensity=0.85):
+        """
+        Applies continuous analog tape speed drift, weighted Kane Pixels intervals
+        (20% normal / 45% warped / 35% low drag), and sporadic tape stalls.
+        """
+        rng = random.Random(seed)
+        n_samples = len(audio)
+        duration = n_samples / sr
+        t = np.linspace(0, duration, n_samples, endpoint=False)
+
+        # 1. Base speed intervals (3.0s to 5.5s chunks)
+        speed_curve = np.ones(n_samples, dtype=np.float32)
+        chunk_t = 0.0
+        while chunk_t < duration:
+            chunk_len = rng.uniform(3.0, 5.5)
+            i0 = int(chunk_t * sr)
+            i1 = min(n_samples, int((chunk_t + chunk_len) * sr))
+            
+            # Kane Pixels weighted distribution: 20% normal / 45% warped / 35% low drag
+            roll = rng.random()
+            if roll < 0.20:
+                base_speed = rng.uniform(0.97, 1.03)
+            elif roll < 0.65:
+                base_speed = rng.uniform(0.82, 0.91) if rng.random() < 0.55 else rng.uniform(1.08, 1.18)
+            else:
+                base_speed = rng.uniform(0.66, 0.78)
+
+            eff_speed = 1.0 + (base_speed - 1.0) * intensity
+            speed_curve[i0:i1] = eff_speed
+            chunk_t += chunk_len
+
+        # Smooth interval transitions (250ms Hann window)
+        smooth_len = max(5, int(sr * 0.25))
+        window = np.hanning(smooth_len)
+        window /= window.sum()
+        speed_curve = signal.convolve(speed_curve, window, mode='same')
+
+        # 2. Add continuous tape flutter and micro-wobble
+        flutter = (
+            0.020 * np.sin(2 * np.pi * 0.35 * t + rng.uniform(0, 6.28)) +
+            0.012 * np.sin(2 * np.pi * 1.80 * t + rng.uniform(0, 6.28)) +
+            0.006 * np.sin(2 * np.pi * 5.20 * t + rng.uniform(0, 6.28))
+        ) * intensity
+        speed_curve = np.clip(speed_curve + flutter, 0.50, 1.45)
+
+        # 3. Sporadic tape catch / drag dropouts
+        n_stalls = max(1, int(duration / 7.0))
+        for _ in range(n_stalls):
+            stall_center = rng.uniform(1.0, max(1.5, duration - 1.0))
+            stall_w = rng.uniform(0.4, 0.9)
+            stall_idx0 = max(0, int((stall_center - stall_w / 2) * sr))
+            stall_idx1 = min(n_samples, int((stall_center + stall_w / 2) * sr))
+            if stall_idx1 > stall_idx0:
+                s_len = stall_idx1 - stall_idx0
+                dip = 1.0 - (0.38 * intensity * np.sin(np.linspace(0, np.pi, s_len)))
+                speed_curve[stall_idx0:stall_idx1] *= dip
+
+        speed_curve = np.clip(speed_curve, 0.45, 1.50)
+
+        # 4. Integrate speed curve to compute resampled phase positions
+        dt = 1.0 / sr
+        phase = np.cumsum(speed_curve) * dt * sr
+        phase = phase - phase[0]
+
+        # Resample each channel
+        out = np.zeros_like(audio)
+        orig_indices = np.arange(n_samples)
+        for ch in range(audio.shape[1]):
+            out[:, ch] = np.interp(phase, orig_indices, audio[:, ch], left=0, right=0)
+
+        return out
+
+    @staticmethod
+    def apply_liminal_reverb(audio, sr=44100, wet=0.35, decay=0.68):
+        """Multi-comb and all-pass Schroeder reverberation modeling vast empty Backrooms halls."""
+        out = np.zeros_like(audio)
+        delays_ms = [29.7, 37.1, 41.1, 44.3]
+        
+        for ch in range(audio.shape[1]):
+            channel_in = audio[:, ch]
+            comb_sum = np.zeros_like(channel_in)
+            for d_ms in delays_ms:
+                d_samples = int(sr * d_ms / 1000.0)
+                if d_samples >= len(channel_in):
+                    continue
+                b = np.zeros(d_samples + 1)
+                b[0] = 1.0
+                a = np.zeros(d_samples + 1)
+                a[0] = 1.0
+                a[-1] = -decay * 0.82
+                comb_out = signal.lfilter(b, a, channel_in)
+                comb_sum += comb_out
+            
+            comb_sum /= len(delays_ms)
+
+            # All-pass diffusion stages
+            for ap_ms in [5.1, 1.8]:
+                ap_samples = int(sr * ap_ms / 1000.0)
+                if ap_samples >= len(comb_sum):
+                    continue
+                g = 0.55
+                b_ap = np.zeros(ap_samples + 1)
+                b_ap[0] = -g
+                b_ap[-1] = 1.0
+                a_ap = np.zeros(ap_samples + 1)
+                a_ap[0] = 1.0
+                a_ap[-1] = -g
+                comb_sum = signal.lfilter(b_ap, a_ap, comb_sum)
+
+            out[:, ch] = channel_in * (1.0 - wet * 0.5) + comb_sum * wet
+
+        return out
+
+    @staticmethod
+    def apply_memory_whisper_echo(audio, sr=44100, delay_sec=2.6, gain=0.18):
+        """Delayed copy passed through corridor bandpass formant filter (ghost voice echo)."""
+        d_samples = int(sr * delay_sec)
+        if d_samples >= len(audio):
+            return audio
+        
+        # Bandpass 750Hz - 2600Hz
+        sos = signal.butter(4, [750, 2600], btype='bandpass', fs=sr, output='sos')
+        filtered = signal.sosfilt(sos, audio, axis=0)
+
+        delayed = np.zeros_like(audio)
+        delayed[d_samples:] = filtered[:-d_samples] * gain
+        return audio + delayed
+
+    @staticmethod
+    def process_full_audio(audio, sr=44100, seed=12345, sliders=None):
+        if sliders is None:
+            sliders = {}
+        master_v = sliders.get("master_val", 85) / 100.0
+        
+        # Ensure float32 stereo (-1.0 to 1.0)
+        if audio.dtype == np.int16:
+            audio_f = (audio.astype(np.float32) / 32768.0)
+        elif audio.dtype == np.int32:
+            audio_f = (audio.astype(np.float32) / 2147483648.0)
+        else:
+            audio_f = audio.astype(np.float32).copy()
+
+        if audio_f.ndim == 1:
+            audio_f = np.column_stack((audio_f, audio_f))
+
+        dbg(f"Audio DSP: Warping {len(audio_f)/sr:.1f}s audio track with Kane Pixels parameters...", "AUDIO")
+        # 1. Analog tape warping with weighted pitch intervals & stalls
+        warped = KanePixelsAudioDSP.apply_tape_warp(audio_f, sr=sr, seed=seed, intensity=master_v)
+
+        # 2. Backrooms vast liminal reverb
+        reverbed = KanePixelsAudioDSP.apply_liminal_reverb(warped, sr=sr, wet=0.38 * master_v, decay=0.70)
+
+        # 3. Ghost memory whisper echo
+        with_echo = KanePixelsAudioDSP.apply_memory_whisper_echo(reverbed, sr=sr, delay_sec=2.6, gain=0.20 * master_v)
+
+        # 4. Fluorescent light 60Hz electromagnetic hum
+        hum = KanePixelsAudioDSP.synthesize_fluorescent_hum(len(with_echo), sr=sr, gain=0.030 * master_v)
+        mixed = with_echo + hum
+
+        # 5. Camcorder AGC & soft saturation limiter (prevent clipping)
+        saturated = np.tanh(mixed * 1.15) / 1.15
+        
+        # Convert back to int16
+        out_int16 = np.clip(saturated * 32767.0, -32767.0, 32767.0).astype(np.int16)
+        dbg(f"Audio DSP: Processing complete.", "AUDIO")
+        return out_int16
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. DYNAMIC ON-FRAME TEXT CORRUPTOR & TEMPORAL SLIP ENGINE
+# Blends in normally 75-80% of the time, occasionally spazzes out into misremembered fonts/backgrounds
 # ─────────────────────────────────────────────────────────────────────────────
 class LocalGlyphCorruptor:
-    PHONETIC_PAIRS = {
-        'e': 'o', 'o': 'e', 'a': 'e', 'i': 'l', 'r': 'n', 'n': 'r',
-        'b': 'd', 'd': 'b', 'c': 's', 's': 'c', 'p': 'b', 'm': 'n',
-        't': 'd', 'k': 'c', 'v': 'w', 'w': 'v', 'u': 'y', 'y': 'u'
-    }
-
     @staticmethod
     def generate_phonetic_mutation(word_len, rng):
         """Generates dynamic phonetic pseudo-word strings matching the length/structure."""
@@ -117,11 +305,38 @@ class LocalGlyphCorruptor:
         return out.capitalize() if rng.random() < 0.4 else out
 
     @staticmethod
-    def corrupt_actual_frame_text(bgr_img, rng, intensity=0.85):
+    def corrupt_actual_frame_text(bgr_img, rng, intensity=0.85, frame_idx=0, fps=30.0):
+        """
+        Sporadic / temporal slip text corruption:
+        - Most of the time (~78%), text blends in untouched like the original video.
+        - In periodic 1.6s - 2.2s slip windows, it spazes out with misremembered fonts/backgrounds.
+        """
+        # Calculate temporal slip window state
+        is_video = (fps > 0 and frame_idx >= 0)
+        t_sec = frame_idx / max(1.0, fps) if is_video else 0.0
+
+        if is_video:
+            # Cycle every ~8.0 seconds: first 6.2s normal (blends in), last 1.8s glitch slip
+            cycle_period = 8.0
+            slip_duration = 1.8
+            t_in_cycle = t_sec % cycle_period
+            is_slip_active = (t_in_cycle >= (cycle_period - slip_duration))
+
+            if not is_slip_active:
+                # Normal reality — text blends in untouched with the video!
+                return bgr_img
+            
+            # During slip: lock pseudo-words to the current window ID so text stays stable & readable
+            window_id = int(t_sec / cycle_period)
+            slip_rng = random.Random(rng.randint(0, 0xFFFF) + window_id * 9973)
+        else:
+            # Static image mode: apply slip cleanly to 1 or 2 text boxes
+            slip_rng = rng
+
         h, w = bgr_img.shape[:2]
         gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
         
-        # Fast gradient text region isolation
+        # Gradient text region isolation
         grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (12, 3)))
@@ -135,22 +350,28 @@ class LocalGlyphCorruptor:
         draw = ImageDraw.Draw(pil_img)
         res_cv = bgr_img.copy()
 
+        corrupted_count = 0
+        max_corrupt = 4 if is_video else 2
+
         for cnt in contours:
+            if corrupted_count >= max_corrupt:
+                break
+
             x, y, bw, bh = cv2.boundingRect(cnt)
             aspect = bw / float(max(1, bh))
             area = bw * bh
 
             if 30 < bw < w * 0.92 and 12 < bh < h * 0.35 and aspect > 1.2 and area > 400:
-                if rng.random() > intensity:
+                if slip_rng.random() > intensity:
                     continue
 
                 roi = gray[y:y+bh, x:x+bw]
                 mean_lum = np.mean(roi)
                 is_white_bg = mean_lum > 140
 
-                mode = rng.random()
+                mode = slip_rng.random()
 
-                if mode < 0.45:
+                if mode < 0.55:
                     # ── DYNAMIC FONT REPLACEMENT WITH CLEAN BACKGROUND (MEME STYLE) ──
                     bg_col = (255, 255, 255) if is_white_bg else (15, 15, 15)
                     fg_col = (10, 10, 10) if is_white_bg else (245, 245, 245)
@@ -159,9 +380,9 @@ class LocalGlyphCorruptor:
 
                     # Estimate approximate word count based on width/height
                     est_words = max(1, bw // int(bh * 1.8))
-                    pseudo_words = [LocalGlyphCorruptor.generate_phonetic_mutation(rng.randint(3, 7), rng) for _ in range(est_words)]
+                    pseudo_words = [LocalGlyphCorruptor.generate_phonetic_mutation(slip_rng.randint(3, 7), slip_rng) for _ in range(est_words)]
                     text_str = " ".join(pseudo_words)
-                    if is_white_bg and rng.random() < 0.35:
+                    if is_white_bg and slip_rng.random() < 0.35:
                         text_str += "."
 
                     f_size = max(12, int(bh * 0.65))
@@ -170,11 +391,12 @@ class LocalGlyphCorruptor:
                     except Exception:
                         font = ImageFont.load_default()
 
-                    tx = x + rng.randint(2, max(4, int(bw * 0.04)))
+                    tx = x + slip_rng.randint(2, max(4, int(bw * 0.04)))
                     ty = y + max(1, int((bh - f_size) / 2))
                     if not is_white_bg:
                         draw.text((tx+1, ty+1), text_str, fill=(0, 0, 0), font=font)
                     draw.text((tx, ty), text_str, fill=fg_col, font=font)
+                    corrupted_count += 1
 
                 else:
                     # ── IN-PLACE CHARACTER FLIP / CASCADE ──
@@ -184,20 +406,20 @@ class LocalGlyphCorruptor:
 
                     char_w = max(6, int(bh * 0.75))
                     if bw > char_w * 2:
-                        cx = rng.randint(0, bw - char_w)
+                        cx = slip_rng.randint(0, bw - char_w)
                         char_slice = text_patch[:, cx:cx+char_w].copy()
                         flipped = cv2.flip(char_slice, 1)
                         text_patch[:, cx:cx+char_w] = cv2.addWeighted(flipped, 0.95, text_patch[:, cx:cx+char_w], 0.05, 0)
                         
-                        # Blit back onto PIL image
                         patch_rgb = Image.fromarray(cv2.cvtColor(text_patch, cv2.COLOR_BGR2RGB))
                         pil_img.paste(patch_rgb, (x, y))
+                        corrupted_count += 1
 
         return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. LOCAL STILL LIFE & LATENT NEURAL RECONSTRUCTION ENGINE
+# 3. LOCAL STILL LIFE & LATENT NEURAL RECONSTRUCTION ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 class LocalStillLifeAIEngine:
     @staticmethod
@@ -270,7 +492,7 @@ class LocalStillLifeAIEngine:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. MASTER COMPOSITE ENGINE
+# 4. MASTER COMPOSITE ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 class MisrememberedEngine:
     def __init__(self):
@@ -287,20 +509,19 @@ class MisrememberedEngine:
         gloss_v  = sliders.get("flesh_gloss", 75) / 100.0
         green_v  = sliders.get("green_shift", 60) / 100.0
 
-        dbg(f'process_frame #{frame_idx} ai={self.use_local_ai} still={still_v:.2f} text={text_v:.2f}', 'FRAME')
         out = frame.copy()
 
         # 1. Local AI Still Life Anatomical & Latent Reconstruction
         if self.use_local_ai and still_v > 0.05:
-            dbg(f'  StillLifeAI intensity={still_v*master_v:.2f} gloss={gloss_v:.2f}', 'AI')
             out = LocalStillLifeAIEngine.apply_local_neural_reconstruction(
                 out, rng, intensity=still_v * master_v, gloss=gloss_v
             )
 
         # 2. Dynamic On-Frame Text Corruption (Fonts & Background Inpainting)
         if text_v > 0.05:
-            dbg(f'  GlyphCorrupt intensity={text_v*master_v:.2f}', 'TEXT')
-            out = LocalGlyphCorruptor.corrupt_actual_frame_text(out, rng, intensity=text_v * master_v)
+            out = LocalGlyphCorruptor.corrupt_actual_frame_text(
+                out, rng, intensity=text_v * master_v, frame_idx=frame_idx, fps=fps
+            )
 
         # 3. The Complex "Green Light" Subtle Shift
         if green_v > 0.10 and rng.random() < 0.35:
@@ -311,44 +532,14 @@ class MisrememberedEngine:
 
         return out
 
-    def render_no_signal_screen(self, width, height, lang):
-        img = np.full((height, width, 3), (180, 0, 0), dtype=np.uint8)
-        noise = np.random.randint(-20, 20, (height, width, 3), dtype=np.int16)
-        img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-        img[::2, :, :] = (img[::2, :, :] * 0.72).astype(np.uint8)
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = max(0.6, width / 600.0)
-        thick = max(1, int(scale * 2))
-        (tw, th), _ = cv2.getTextSize(lang, font, scale, thick)
-        tx = (width - tw) // 2
-        ty = (height + th) // 2
-        cv2.putText(img, lang, (tx+2, ty+2), font, scale, (0, 0, 40), thick+1, cv2.LINE_AA)
-        cv2.putText(img, lang, (tx, ty), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
-        return img
-
-    def render_static_screen(self, width, height):
-        small = np.random.randint(0, 256, (max(1, height // 3), max(1, width // 3)), dtype=np.uint8)
-        bgr = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
-        return cv2.resize(bgr, (width, height), interpolation=cv2.INTER_NEAREST)
-
-    def render_no_video_screen(self, frame, time_sec):
-        h, w = frame.shape[:2]
-        res = np.zeros((h, w, 3), dtype=np.uint8)
-        res[::3, :, :] = 10
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = max(0.6, w / 700.0)
-        cv2.putText(res, "PLAY >", (28, 48), font, scale, (34, 238, 232), 2, cv2.LINE_AA)
-        cv2.putText(res, "NO VIDEO", (28, 88), font, scale, (34, 238, 232), 2, cv2.LINE_AA)
-        return res
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. DESKTOP GUI APPLICATION (CUSTOMTKINTER)
+# 5. DESKTOP GUI APPLICATION (CUSTOMTKINTER)
 # ─────────────────────────────────────────────────────────────────────────────
 class MisrememberedDesktopApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("MISREMEMBERED MEDIA // LOCAL AI RECONSTRUCTION TERMINAL")
+        self.title("MISREMEMBERED MEDIA // KANE PIXELS RECONSTRUCTION TERMINAL")
         self.geometry("1340x880")
         self.minsize(1080, 720)
         self.configure(fg_color="#07080b")
@@ -364,7 +555,7 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.setup_ui()
 
         _launch_debug_terminal()
-        dbg(f'App started. seed={self.engine.seed:08X}', 'INIT')
+        dbg(f'App initialized. seed={self.engine.seed:08X}', 'INIT')
 
         if not FFMPEG:
             self.after(800, self.prompt_ffmpeg_install)
@@ -396,8 +587,10 @@ class MisrememberedDesktopApp(ctk.CTk):
                 global FFMPEG
                 FFMPEG = os.path.join(FFMPEG_LOCAL_DIR, "bin", "ffmpeg.exe")
                 self.add_log("FFmpeg installed successfully!", "info")
+                dbg("FFmpeg installed locally", "INIT")
             except Exception as e:
                 self.add_log(f"FFmpeg install failed: {e}", "warn")
+                dbg(f"FFmpeg install failed: {e}", "ERROR")
         threading.Thread(target=_install, daemon=True).start()
 
     def setup_ui(self):
@@ -456,6 +649,7 @@ class MisrememberedDesktopApp(ctk.CTk):
 
         self.tab_anatomy = self.tabs.add("STILL LIFE")
         self.tab_text = self.tabs.add("TEXT CORRUPTOR")
+        self.tab_audio = self.tabs.add("KANE AUDIO DSP")
 
         self.setup_tabs()
 
@@ -505,10 +699,19 @@ class MisrememberedDesktopApp(ctk.CTk):
             self._make_slider_group(self.tab_anatomy, title, key, mn, mx, df, clr)
 
         sliders_2 = [
-            ("On-Frame Glyph Corruption", "poster_melt", 0, 100, 90, "#ff3344"),
+            ("On-Frame Glyph Corruption", "poster_melt", 0, 100, 85, "#ff3344"),
         ]
         for title, key, mn, mx, df, clr in sliders_2:
             self._make_slider_group(self.tab_text, title, key, mn, mx, df, clr)
+
+        sliders_3 = [
+            ("Tape Wow / Flutter & Stalls", "audio_warp", 0, 100, 85, "#00ff66"),
+            ("Vast Drywall Liminal Reverb", "audio_reverb", 0, 100, 75, "#ff3344"),
+            ("60Hz Fluorescent Buzz Gain", "audio_hum", 0, 100, 65, "#00ff66"),
+            ("Memory Ghost Voice Echo", "audio_echo", 0, 100, 70, "#ff3344"),
+        ]
+        for title, key, mn, mx, df, clr in sliders_3:
+            self._make_slider_group(self.tab_audio, title, key, mn, mx, df, clr)
 
     def _make_slider_group(self, parent, title, key, mn, mx, df, clr):
         box = ctk.CTkFrame(parent, fg_color="#13161f", corner_radius=6, border_width=1, border_color="#1f2432")
@@ -532,6 +735,7 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.engine.use_local_ai = self.ai_switch.get() == 1
         state = "ENABLED" if self.engine.use_local_ai else "DISABLED"
         self.add_log(f"Local AI Still Life Engine {state}", "info")
+        dbg(f"Local AI Engine toggled: {state}", "AI")
         self.refresh_preview()
 
     def add_log(self, msg, level="info"):
@@ -547,6 +751,7 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.engine.set_seed(random.randint(0, 0xFFFFFFFF))
         self.seed_lbl.configure(text=f"SEED: {self.engine.seed:08X}")
         self.add_log(f"Re-seeded RNG state: {self.engine.seed:08X}", "info")
+        dbg(f"Re-seeded RNG state: {self.engine.seed:08X}", "SEED")
         self.refresh_preview()
 
     def load_media(self):
@@ -564,6 +769,7 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.export_btn.configure(state="normal")
         self.status_lbl.configure(text=f"LOADED: {os.path.basename(path).upper()}")
         self.add_log(f"Loaded source file: {os.path.basename(path)}", "info")
+        dbg(f"Loaded media: {path}", "IO")
 
         is_img = path.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
         if is_img:
@@ -606,7 +812,7 @@ class MisrememberedDesktopApp(ctk.CTk):
     def video_preview_loop(self):
         cap = cv2.VideoCapture(self.current_media_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_delay = 1.0 / fps
+        frame_delay = 1.0 / max(10.0, fps)
         frame_idx = 0
 
         while self.is_previewing and cap.isOpened():
@@ -651,15 +857,12 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_bar.pack(side="bottom", fill="x")
 
-        # CRITICAL FIX: Snapshot ALL state on the main thread NOW.
-        # Calling get_sliders() or reading engine state inside a background
-        # thread on Windows reads tkinter widgets unsafely and silently returns
-        # wrong/default values — causing export to have zero effects.
+        # Snapshot all state on the main thread
         _snap_sliders = self.get_sliders()
         _snap_ai      = self.engine.use_local_ai
         _snap_seed    = self.engine.seed
         _snap_path    = self.current_media_path
-        dbg(f'Export start — seed={_snap_seed:08X} ai={_snap_ai} sliders={_snap_sliders}', 'EXPORT')
+        dbg(f'Export initiated — seed={_snap_seed:08X} ai={_snap_ai} sliders={_snap_sliders}', 'EXPORT')
 
         threading.Thread(
             target=self.export_video_thread,
@@ -668,11 +871,16 @@ class MisrememberedDesktopApp(ctk.CTk):
         ).start()
 
     def export_video_thread(self, sliders, use_local_ai, seed, in_path):
+        temp_video = None
+        temp_in_wav = None
+        temp_out_wav = None
         try:
             out_dir = os.path.dirname(in_path)
             base = os.path.splitext(os.path.basename(in_path))[0]
             final_path = os.path.join(out_dir, f"ꓫ REMΕMᗷER_{base}_MISREMEMBERED.mp4")
-            temp_video = os.path.join(tempfile.gettempdir(), f"_temp_{int(time.time())}.mp4")
+            temp_video = os.path.join(tempfile.gettempdir(), f"_temp_vid_{int(time.time())}.mp4")
+            temp_in_wav = os.path.join(tempfile.gettempdir(), f"_temp_in_{int(time.time())}.wav")
+            temp_out_wav = os.path.join(tempfile.gettempdir(), f"_temp_out_{int(time.time())}.wav")
 
             cap = cv2.VideoCapture(in_path)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -680,7 +888,7 @@ class MisrememberedDesktopApp(ctk.CTk):
             orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 300
 
-            # Turbo Encoding Optimization: Cap max dimension to 1280px for 5x export speed
+            # Turbo Encoding Optimization: Cap max dimension to 1280px for export speed
             target_w, target_h = orig_w, orig_h
             if orig_w > 1280:
                 target_w = 1280
@@ -692,9 +900,8 @@ class MisrememberedDesktopApp(ctk.CTk):
             frame_idx = 0
             start_t = time.time()
 
-            self.add_log(f"Turbo Export: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
-            dbg(f"Export confirmed: ai={use_local_ai} seed={seed:08X} sliders={sliders}", "EXPORT")
-            dbg(f"  {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f}fps total={total_frames}", "EXPORT")
+            self.add_log(f"Reconstruction Export: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
+            dbg(f"Video Export started: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f}fps, total={total_frames}", "EXPORT")
 
             while cap.isOpened():
                 ret, frame = cap.read()
@@ -725,28 +932,52 @@ class MisrememberedDesktopApp(ctk.CTk):
 
             cap.release()
             writer.release()
+            dbg(f"Video frame rendering complete ({total_frames} frames).", "EXPORT")
 
+            # ── AUDIO PROCESSING WITH KANE PIXELS DSP ──
             if FFMPEG:
-                pitch_rate = 0.88
+                self.add_log("Processing Backrooms audio DSP (tape wow, liminal reverb, fluorescent hum)...", "info")
+                # 1. Extract audio track
+                ext_cmd = [FFMPEG, "-y", "-i", in_path, "-vn", "-ac", "2", "-ar", "44100", temp_in_wav]
+                subprocess.run(ext_cmd, capture_output=True, timeout=60)
+
+                has_audio = os.path.exists(temp_in_wav) and os.path.getsize(temp_in_wav) > 1000
+
+                if has_audio:
+                    try:
+                        sr, raw_audio = wavfile.read(temp_in_wav)
+                        proc_audio = KanePixelsAudioDSP.process_full_audio(raw_audio, sr=sr, seed=seed, sliders=sliders)
+                        wavfile.write(temp_out_wav, sr, proc_audio)
+                    except Exception as e:
+                        dbg(f"Audio DSP error on input audio: {e}", "ERROR")
+                        has_audio = False
+
+                if not has_audio:
+                    # Generate authentic Backrooms atmosphere / fluorescent drone for silent media
+                    sr = 44100
+                    duration_s = max(1.0, total_frames / float(fps))
+                    n_samples = int(sr * duration_s)
+                    dbg(f"Synthesizing {duration_s:.1f}s Backrooms atmospheric drone...", "AUDIO")
+                    hum = KanePixelsAudioDSP.synthesize_fluorescent_hum(n_samples, sr=sr, gain=0.045)
+                    wavfile.write(temp_out_wav, sr, (hum * 32767.0).astype(np.int16))
+
+                # 2. Final Remux with FFmpeg
+                self.add_log("Remuxing final high-fidelity video & audio payload...", "info")
                 cmd = [
                     FFMPEG, "-y",
                     "-i", temp_video,
-                    "-i", in_path,
+                    "-i", temp_out_wav,
                     "-map", "0:v:0",
-                    "-map", "1:a:0?",
+                    "-map", "1:a:0",
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
-                    "-crf", "20",
+                    "-crf", "19",
                     "-c:a", "aac",
-                    "-af", f"asetrate={int(44100 * pitch_rate)},aresample=44100",
+                    "-b:a", "192k",
                     "-shortest",
                     final_path
                 ]
                 subprocess.run(cmd, capture_output=True, timeout=600)
-                try:
-                    os.remove(temp_video)
-                except Exception:
-                    pass
             else:
                 import shutil
                 shutil.move(temp_video, final_path)
@@ -754,15 +985,24 @@ class MisrememberedDesktopApp(ctk.CTk):
             self.after(0, lambda: self.on_export_complete(final_path))
         except Exception as e:
             self.add_log(f"Export error: {e}", "warn")
+            dbg(f"Export error: {e}", "ERROR")
             self.is_processing = False
             self.export_btn.configure(state="normal")
             self.progress_bar.pack_forget()
+        finally:
+            for p in [temp_video, temp_in_wav, temp_out_wav]:
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 
     def on_export_complete(self, path):
         self.is_processing = False
         self.export_btn.configure(state="normal")
         self.progress_bar.pack_forget()
         self.add_log(f"Export Complete: {os.path.basename(path)}", "info")
+        dbg(f"Export completed: {path}", "DONE")
         messagebox.showinfo("Export Complete", f"Saved reconstructed media to:\n{path}")
 
 
