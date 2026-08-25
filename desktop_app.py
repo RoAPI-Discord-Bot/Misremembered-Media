@@ -391,15 +391,52 @@ class LocalGlyphCorruptor:
                 roi = gray[y:y+bh, x:x+bw]
                 is_white_bg = np.mean(roi) > 135
 
-                # 5 Authentic Modes based on reference images
-                effect_mode = rng.choice([
-                    'box_overlay', 'vertical_barcode_melt', 'glyph_serration', 
-                    'bisect_mirror', 'angled_ghost'
-                ])
+                # ── COMPOUNDING KANE PIXELS "FORGETS / STILL LIFE" TEXT DISTORTION ──
+                # All reference effects compound, layer, and add together onto the text region:
+                patch = out[y:y+bh, x:x+bw].copy()
+                if patch.size == 0:
+                    continue
 
-                # ── MODE 1: Inpainted Box & Phonetic Mutation (Ref 1) ──
-                # Duplicates text in-place with sharp rectangular background box matching font/colors
-                if effect_mode == 'box_overlay':
+                # 1. In-Place Razor Glyph Serration & Vertical Slicing (Ref 3)
+                if intensity > 0.20:
+                    strip_w = max(2, int(bh * 0.16))
+                    for sx in range(0, bw, strip_w * 2):
+                        ex = min(bw, sx + strip_w)
+                        shift = rng.choice([-1, 1]) * rng.randint(2, max(3, int(bh * 0.22)))
+                        M = np.float32([[1, 0, 0], [0, 1, shift]])
+                        patch[:, sx:ex] = cv2.warpAffine(patch[:, sx:ex], M, (ex - sx, bh), borderMode=cv2.BORDER_REFLECT)
+                    out[y:y+bh, x:x+bw] = patch
+
+                # 2. Horizontal Bisect & Inversion Seam (Ref 4)
+                if intensity > 0.35 and rng.random() < 0.65:
+                    half_h = bh // 2
+                    if half_h > 2:
+                        flipped_lower = cv2.flip(patch[half_h:, :], -1)
+                        patch[half_h:, :] = cv2.addWeighted(flipped_lower, 0.85, patch[half_h:, :], 0.15, 0)
+                        bar_h = max(2, int(bh * 0.10))
+                        patch[half_h-bar_h//2:half_h+bar_h//2, :] = 0
+                        out[y:y+bh, x:x+bw] = patch
+
+                # 3. Angled Ghost Trailing & Offset Duplicate Layers (Ref 2)
+                if intensity > 0.25 and rng.random() < 0.80:
+                    shift_x = rng.choice([-1, 1]) * rng.randint(3, max(5, int(bw * 0.07)))
+                    shift_y = rng.choice([-1, 1]) * rng.randint(2, max(4, int(bh * 0.20)))
+                    M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+                    ghost = cv2.warpAffine(patch, M, (bw, bh), borderMode=cv2.BORDER_REFLECT)
+                    out[y:y+bh, x:x+bw] = cv2.addWeighted(out[y:y+bh, x:x+bw], 0.60, ghost, 0.40, 0)
+
+                # 4. Vertical Barcode Smear / Dripping Lines (Ref 5)
+                if intensity > 0.40 and rng.random() < 0.70:
+                    drip_len = rng.randint(int(bh * 1.5), int(bh * 3.5))
+                    bottom_row = patch[-2:, :, :]
+                    drip_block = np.repeat(bottom_row[-1:, :, :], drip_len, axis=0)
+                    y_end = min(h, y + bh + drip_len)
+                    act_len = y_end - (y + bh)
+                    if act_len > 0:
+                        out[y+bh:y_end, x:x+bw] = cv2.addWeighted(out[y+bh:y_end, x:x+bw], 0.35, drip_block[:act_len, :], 0.65, 0)
+
+                # 5. Inpainted Box & Phonetic Mutation Overlays (Ref 1)
+                if intensity > 0.30 and rng.random() < 0.75:
                     bg_col = (255, 255, 255) if is_white_bg else (10, 10, 10)
                     fg_col = (10, 10, 10) if is_white_bg else (245, 245, 245)
                     
@@ -416,61 +453,8 @@ class LocalGlyphCorruptor:
                     except Exception:
                         font = ImageFont.load_default()
                     draw.text((ox + 4, oy + max(1, int((bh - f_size)/2))), text_str, fill=fg_col, font=font)
-                    corrupted_count += 1
 
-                # ── MODE 2: Vertical Barcode Smear / Dripping Lines (Ref 5) ──
-                # Extrudes letter strokes straight downwards into dripping barcode lines
-                elif effect_mode == 'vertical_barcode_melt':
-                    patch = out[y:y+bh, x:x+bw].copy()
-                    if patch.size > 0:
-                        drip_len = rng.randint(int(bh * 1.5), int(bh * 3.5))
-                        bottom_row = patch[-2:, :, :]
-                        drip_block = np.repeat(bottom_row[-1:, :, :], drip_len, axis=0)
-                        y_end = min(h, y + bh + drip_len)
-                        act_len = y_end - (y + bh)
-                        if act_len > 0:
-                            out[y+bh:y_end, x:x+bw] = drip_block[:act_len, :]
-                            corrupted_count += 1
-
-                # ── MODE 3: In-Place Razor Glyph Serration & Vertical Slicing (Ref 3) ──
-                # Slices letters into thin vertical razor columns shifted up/down
-                elif effect_mode == 'glyph_serration':
-                    patch = out[y:y+bh, x:x+bw].copy()
-                    if patch.size > 0:
-                        strip_w = max(2, int(bh * 0.18))
-                        for sx in range(0, bw, strip_w * 2):
-                            ex = min(bw, sx + strip_w)
-                            shift = rng.choice([-1, 1]) * rng.randint(2, max(3, int(bh * 0.25)))
-                            M = np.float32([[1, 0, 0], [0, 1, shift]])
-                            patch[:, sx:ex] = cv2.warpAffine(patch[:, sx:ex], M, (ex - sx, bh), borderMode=cv2.BORDER_REFLECT)
-                        out[y:y+bh, x:x+bw] = patch
-                        corrupted_count += 1
-
-                # ── MODE 4: Horizontal Bisect & Inverted Mirror Fold (Ref 4) ──
-                # Cuts line horizontally and flips bottom half upside down & backwards
-                elif effect_mode == 'bisect_mirror':
-                    patch = out[y:y+bh, x:x+bw].copy()
-                    if patch.size > 0:
-                        half_h = bh // 2
-                        if half_h > 2:
-                            flipped_lower = cv2.flip(patch[half_h:, :], -1)
-                            patch[half_h:, :] = cv2.addWeighted(flipped_lower, 0.85, patch[half_h:, :], 0.15, 0)
-                            bar_h = max(2, int(bh * 0.10))
-                            patch[half_h-bar_h//2:half_h+bar_h//2, :] = 0
-                            out[y:y+bh, x:x+bw] = patch
-                            corrupted_count += 1
-
-                # ── MODE 5: Angled Ghost Trailing & Offset Layers (Ref 2) ──
-                # Creates semi-transparent duplicated layers drifting at an angle ("Ask Still Life")
-                elif effect_mode == 'angled_ghost':
-                    patch = out[y:y+bh, x:x+bw].copy()
-                    if patch.size > 0:
-                        shift_x = rng.choice([-1, 1]) * rng.randint(3, max(5, int(bw * 0.08)))
-                        shift_y = rng.choice([-1, 1]) * rng.randint(2, max(4, int(bh * 0.22)))
-                        M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-                        ghost = cv2.warpAffine(patch, M, (bw, bh), borderMode=cv2.BORDER_REFLECT)
-                        out[y:y+bh, x:x+bw] = cv2.addWeighted(out[y:y+bh, x:x+bw], 0.55, ghost, 0.45, 0)
-                        corrupted_count += 1
+                corrupted_count += 1
 
         pil_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         return cv2.addWeighted(out, 0.5, pil_bgr, 0.5, 0)
