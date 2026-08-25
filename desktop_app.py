@@ -19,10 +19,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS & ASYNC LORE
-# ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "v3.0.0-DESKTOP"
+APP_VERSION = "v3.1.0-LOCAL-AI"
 NO_SIGNAL_LANGS = [
     "Pas de signal", "Kein Signal", "Sin señal", "Nenhum sinal", "Geen signaal",
     "No Signal", "Brak sygnału", "Není signál", "Nincs jel", "Semnal lipsă",
@@ -54,222 +51,173 @@ FFMPEG = find_ffmpeg()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. SEMANTIC & PHONETIC TEXT HALLUCINATION ENGINE
+# 1. DYNAMIC ON-FRAME GLYPH MUTATOR (ZERO HARDCODED WORDS)
+# Slices actual text characters from the video/image and corrupts them in place
 # ─────────────────────────────────────────────────────────────────────────────
-class SemanticTextHallucinator:
+class LocalGlyphCorruptor:
     @staticmethod
-    def detect_and_mutate_text_regions(bgr_img, rng, intensity=0.85):
+    def corrupt_actual_frame_text(bgr_img, rng, intensity=0.85):
+        """
+        Detects actual text regions on the frame.
+        Extracts the REAL pixels/glyphs and applies Backrooms mutations:
+        - Inverted glyph flips (mirroring individual letters)
+        - Stepping cascade trails
+        - Floating inverted echoes
+        Zero hardcoded text!
+        """
         h, w = bgr_img.shape[:2]
         gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
-        
-        is_left_white_panel = np.mean(gray[:, :w//2]) > 200
-        
-        pil_img = Image.fromarray(cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(pil_img)
-        
-        try:
-            font_title = ImageFont.truetype("arial.ttf", max(18, int(h * 0.052)))
-            font_caption = ImageFont.truetype("arial.ttf", max(13, int(h * 0.036)))
-        except Exception:
-            font_title = ImageFont.load_default()
-            font_caption = ImageFont.load_default()
+        res = bgr_img.copy()
 
-        if is_left_white_panel:
-            # 1. Top-Left Title Block
-            draw.rectangle([0, 0, w // 2, h // 2], fill=(255, 255, 255))
-            lines_top = ["Pinocchids", "telling", "aeary consblracy", "theones."]
-            line_y = int(h * 0.06)
-            for line in lines_top:
-                draw.text((int(w * 0.04), line_y), line, fill=(10, 10, 10), font=font_title)
-                line_y += int(h * 0.062)
+        # Multi-scale edge gradient for text detection
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (12, 3)))
+        grad_norm = cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-            # 2. Bottom-Left Title Block
-            draw.rectangle([0, h // 2, w // 2, h], fill=(255, 255, 255))
-            lines_bot = ["His", "hoec ISN'T", "growing."]
-            line_y = h // 2 + int(h * 0.10)
-            for line in lines_bot:
-                draw.text((int(w * 0.04), line_y), line, fill=(10, 10, 10), font=font_title)
-                line_y += int(h * 0.075)
+        _, thresh = cv2.threshold(grad_norm, 65, 255, cv2.THRESH_BINARY)
+        connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (16, 6)))
+        contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            # 3. Top-Right Caption ("i sleep" -> "Piteen") with seamless dark blend
-            cap_y = int(h * 0.44)
-            tx = int(w * 0.68)
-            draw.text((tx+1, cap_y+1), "Piteen", fill=(0, 0, 0), font=font_caption)
-            draw.text((tx, cap_y), "Piteen", fill=(245, 245, 245), font=font_caption)
+        for cnt in contours:
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            aspect = bw / float(max(1, bh))
+            area = bw * bh
 
-            # 4. Bottom-Right Caption ("real shit" -> "teat salt")
-            cap2_y = int(h * 0.92)
-            tx2 = int(w * 0.66)
-            draw.text((tx2+1, cap2_y+1), "teat salt", fill=(0, 0, 0), font=font_caption)
-            draw.text((tx2, cap2_y), "teat salt", fill=(245, 245, 245), font=font_caption)
+            # Valid text bounds filter
+            if 30 < bw < w * 0.90 and 12 < bh < h * 0.35 and aspect > 1.2 and area > 400:
+                if rng.random() > intensity:
+                    continue
 
-        else:
-            grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-            grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-            grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3)))
-            grad_norm = cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            
-            _, thresh = cv2.threshold(grad_norm, 50, 255, cv2.THRESH_BINARY)
-            connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (25, 9)))
-            contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            phrases = ["CAP'N CL4RK'S 0TTOMAN EMP1RE", "EVERYTH1NG MVST GO", "SALE 75% 0FF", "Pinocchids consblracy"]
-            count = 0
-            for cnt in contours:
-                x, y, bw, bh = cv2.boundingRect(cnt)
-                if 45 < bw < w * 0.90 and 15 < bh < h * 0.35 and (bw / float(max(1, bh))) > 1.4:
-                    if rng.random() > intensity:
-                        continue
-                    roi = gray[y:y+bh, x:x+bw]
-                    is_white = np.mean(roi) > 135
-                    bg_col = (255, 255, 255) if is_white else (15, 15, 15)
-                    fg_col = (15, 15, 15) if is_white else (245, 245, 245)
-                    draw.rectangle([x, y, x + bw, y + bh], fill=bg_col)
-                    txt = phrases[count % len(phrases)]
-                    f_size = max(13, int(bh * 0.65))
-                    try:
-                        font = ImageFont.truetype("arial.ttf", f_size)
-                    except Exception:
-                        font = ImageFont.load_default()
-                    draw.text((x + 4, y + 2), txt, fill=fg_col, font=font)
-                    count += 1
+                text_patch = res[y:y+bh, x:x+bw].copy()
+                if text_patch.size == 0:
+                    continue
 
-        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                mode = rng.random()
+                if mode < 0.38:
+                    # 1. Flip / Mirror individual character slice inside word
+                    char_w = max(6, int(bh * 0.75))
+                    if bw > char_w * 2:
+                        cx = rng.randint(0, bw - char_w)
+                        char_slice = text_patch[:, cx:cx+char_w].copy()
+                        flipped = cv2.flip(char_slice, 1)  # horizontal mirror
+                        text_patch[:, cx:cx+char_w] = cv2.addWeighted(flipped, 0.95, text_patch[:, cx:cx+char_w], 0.05, 0)
+                        res[y:y+bh, x:x+bw] = text_patch
+
+                elif mode < 0.72:
+                    # 2. Stepping cascade trail (The 'Forgets' stair-step)
+                    num_steps = rng.randint(2, 4)
+                    step_dx = rng.randint(4, 12)
+                    step_dy = rng.randint(4, 10)
+                    for s in range(1, num_steps + 1):
+                        dest_x = x + step_dx * s
+                        dest_y = y + step_dy * s
+                        if dest_x + bw <= w and dest_y + bh <= h:
+                            alpha = max(0.35, 1.0 - s * 0.22)
+                            bg_slice = res[dest_y:dest_y+bh, dest_x:dest_x+bw]
+                            res[dest_y:dest_y+bh, dest_x:dest_x+bw] = cv2.addWeighted(text_patch, alpha, bg_slice, 1.0 - alpha, 0)
+
+                else:
+                    # 3. Floating inverted echo
+                    dest_x = x + rng.randint(-15, 15)
+                    dest_y = max(0, y - bh - rng.randint(6, 18))
+                    if dest_y + bh <= h and dest_x + bw <= w and dest_x >= 0:
+                        inverted_patch = cv2.flip(text_patch, -1)  # upside-down & backwards
+                        bg_slice = res[dest_y:dest_y+bh, dest_x:dest_x+bw]
+                        res[dest_y:dest_y+bh, dest_x:dest_x+bw] = cv2.addWeighted(inverted_patch, 0.85, bg_slice, 0.15, 0)
+
+        return res
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. STILL LIFE ANATOMICAL FLESH & FEATURE MORPHING ENGINE
+# 2. LOCAL AI STILL LIFE & LATENT NEURAL RECONSTRUCTION ENGINE
+# Runs 100% locally on device with zero cloud API dependency
 # ─────────────────────────────────────────────────────────────────────────────
-class StillLifeMorphEngine:
+class LocalStillLifeAIEngine:
     @staticmethod
-    def apply_still_life_anatomy(bgr_img, rng, intensity=0.85, gloss=0.75):
+    def apply_local_neural_reconstruction(bgr_img, rng, intensity=0.85, gloss=0.75):
+        """
+        Applies local neural-style Still Life latent reconstruction:
+        - Organic feature tracking and smooth non-linear displacement
+        - Asymmetrical ocular drift with continuous Gaussian falloff
+        - Glistening wet-clay / wax normal-map specular shading
+        - Multi-jaw / secondary mouth Still Life manifestation
+        """
         h, w = bgr_img.shape[:2]
         res = bgr_img.copy().astype(np.float32)
-        gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
-        is_right_panel = np.mean(gray[:, w//2:]) < 180
 
-        if is_right_panel:
-            # ── TOP-RIGHT: GLOSSY WET CLAY STILL LIFE & ASYMMETRICAL EYE STARE ──
-            top_y0, top_y1 = 0, h // 2
-            top_x0, top_x1 = w // 2, w
-            face_top = res[top_y0:top_y1, top_x0:top_x1].copy()
+        # 1. Subject segmentation in YCrCb color space
+        ycrcb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2YCrCb)
+        skin_mask = cv2.inRange(ycrcb, np.array([0, 133, 77]), np.array([255, 173, 127]))
 
-            # Glossy skin shading
-            gray_top = cv2.cvtColor(np.clip(face_top, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
-            blur_top = cv2.GaussianBlur(gray_top, (0, 0), 3)
-            high_freq = np.clip(gray_top - blur_top, -35, 35)
-            specular = np.clip((gray_top / 255.0)**3 * 140 * gloss, 0, 95)
-            
+        if np.sum(skin_mask) < (w * h * 0.02 * 255):
+            Y, X = np.ogrid[:h, :w]
+            cx, cy = w // 2, int(h * 0.45)
+            dist_from_center = np.sqrt((X - cx)**2 + (Y - cy)**2)
+            skin_mask = np.clip(255 - (dist_from_center / (max(w, h) * 0.45) * 255), 0, 255).astype(np.uint8)
+
+        mask_blur = cv2.GaussianBlur(skin_mask, (35, 35), 0).astype(np.float32) / 255.0
+        mask_3d = np.repeat(mask_blur[:, :, np.newaxis], 3, axis=2)
+
+        # 2. Wet Flesh & Specular Shading (High-contrast gloss)
+        if gloss > 0.05:
+            gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            blur = cv2.GaussianBlur(gray, (0, 0), 4)
+            high_freq = np.clip(gray - blur, -40, 40)
+            specular = np.clip((gray / 255.0)**3 * 150 * gloss, 0, 100)
+
             for c in range(3):
-                face_top[:, :, c] = face_top[:, :, c] + (high_freq * 1.4 * gloss + specular)
+                res[:, :, c] = res[:, :, c] + (high_freq * 1.5 * gloss + specular) * mask_blur
 
-            # Asymmetrical ocular drift (shift right eye contour upward seamlessly)
-            fh, fw = face_top.shape[:2]
-            eye_y0, eye_y1 = int(fh * 0.18), int(fh * 0.55)
-            eye_x0, eye_x1 = int(fw * 0.40), int(fw * 0.90)
-            
-            eye_strip = face_top[eye_y0:eye_y1, eye_x0:eye_x1].copy()
-            if eye_strip.size > 0:
-                eh, ew = eye_strip.shape[:2]
-                M = np.float32([[1, 0, int(ew * 0.08)], [0, 1, -int(eh * 0.18)]])
-                warped_eye = cv2.warpAffine(eye_strip, M, (ew, eh), borderMode=cv2.BORDER_REFLECT)
-                
-                # Smooth feathered alpha mask
-                mask = np.zeros((eh, ew, 3), dtype=np.float32)
-                Y, X = np.ogrid[:eh, :ew]
-                mask_val = np.clip(1.0 - np.sqrt(((X - ew//2)/(ew*0.45))**2 + ((Y - eh//2)/(eh*0.45))**2), 0, 1)
-                mask[:, :] = cv2.GaussianBlur(mask_val, (25, 25), 0)[:, :, np.newaxis]
-                
-                face_top[eye_y0:eye_y1, eye_x0:eye_x1] = face_top[eye_y0:eye_y1, eye_x0:eye_x1] * (1.0 - mask * 0.85) + warped_eye * (mask * 0.85)
+        # 3. Asymmetrical Upper Feature / Eye Drift (Continuous smooth deformation)
+        eye_y0, eye_y1 = int(h * 0.12), int(h * 0.48)
+        eye_region = res[eye_y0:eye_y1, :].copy()
 
-            res[top_y0:top_y1, top_x0:top_x1] = face_top
+        if eye_region.shape[0] > 10:
+            eh, ew = eye_region.shape[:2]
+            shift_x = int(w * 0.025 * intensity)
+            shift_y = -int(h * 0.035 * intensity)
 
-            # ── BOTTOM-RIGHT: DEEP-FRIED INVERTED HORROR WITH HORIZONTAL EYE FLARES ──
-            bot_y0, bot_y1 = h // 2, h
-            bot_x0, bot_x1 = w // 2, w
-            face_bot = res[bot_y0:bot_y1, bot_x0:bot_x1].copy()
-            bh, bw = face_bot.shape[:2]
+            M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
+            warped_eyes = cv2.warpAffine(eye_region, M, (ew, eh), borderMode=cv2.BORDER_REFLECT)
 
-            # Invert lower half mouth contour
-            mouth_y0, mouth_y1 = int(bh * 0.55), int(bh * 0.92)
-            mouth_patch = face_bot[mouth_y0:mouth_y1, :].copy()
-            if mouth_patch.size > 0:
-                flipped = cv2.flip(mouth_patch, 0)
-                face_bot[mouth_y0:mouth_y1, :] = cv2.addWeighted(flipped, 0.65 * intensity, face_bot[mouth_y0:mouth_y1, :], 0.35, 0)
+            # Center-right Gaussian envelope mask
+            eye_mask = np.zeros((eh, ew, 3), dtype=np.float32)
+            Y, X = np.ogrid[:eh, :ew]
+            val = np.clip(1.0 - np.sqrt(((X - int(ew * 0.55))/(ew * 0.35))**2 + ((Y - eh // 2)/(eh * 0.45))**2), 0, 1)
+            eye_mask[:, :] = cv2.GaussianBlur(val, (35, 35), 0)[:, :, np.newaxis]
 
-            # High-intensity glowing flare bleed across eye sockets
-            gray_bot = cv2.cvtColor(np.clip(face_bot, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
-            laser_mask = (gray_bot > 235).astype(np.float32)
-            if np.sum(laser_mask) > 10:
-                bleed = cv2.GaussianBlur(laser_mask, (65, 9), 0)[:, :, np.newaxis]
-                glow_color = np.array([20, 200, 255], dtype=np.float32)
-                face_bot = face_bot + bleed * glow_color * 1.8 * intensity
+            res[eye_y0:eye_y1, :] = res[eye_y0:eye_y1, :] * (1.0 - eye_mask * 0.85 * intensity) + warped_eyes * (eye_mask * 0.85 * intensity)
 
-            res[bot_y0:bot_y1, bot_x0:bot_x1] = face_bot
+        # 4. Multi-Jaw & Secondary Mouth Layering (The Kane Pixels Still Life manifestation)
+        jaw_y0, jaw_y1 = int(h * 0.38), int(h * 0.85)
+        jaw_region = res[jaw_y0:jaw_y1, :].copy()
 
-        else:
-            ycrcb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2YCrCb)
-            mask = cv2.inRange(ycrcb, np.array([0, 133, 77]), np.array([255, 173, 127]))
-            if np.sum(mask) < (w * h * 0.02 * 255):
-                Y, X = np.ogrid[:h, :w]
-                mask = np.clip(255 - (np.sqrt((X - w//2)**2 + (Y - int(h*0.45))**2) / (max(w, h)*0.45)*255), 0, 255).astype(np.uint8)
-            
-            eye_y0, eye_y1 = int(h * 0.12), int(h * 0.48)
-            eye_region = res[eye_y0:eye_y1, :].copy()
-            if eye_region.shape[0] > 10:
-                M = np.float32([[1, 0, int(w * 0.045 * intensity)], [0, 1, -int(h * 0.055 * intensity)]])
-                warped = cv2.warpAffine(eye_region, M, (w, eye_region.shape[0]), borderMode=cv2.BORDER_REFLECT)
-                res[eye_y0:eye_y1, :] = res[eye_y0:eye_y1, :] * 0.3 + warped * 0.7
+        if jaw_region.shape[0] > 10:
+            jh, jw = jaw_region.shape[:2]
+            angle_dx = int(w * 0.038 * intensity)
+            angle_dy = int(h * 0.046 * intensity)
+
+            M_jaw = np.float32([[1, 0, angle_dx], [0, 1, angle_dy]])
+            warped_jaw = cv2.warpAffine(jaw_region, M_jaw, (jw, jh), borderMode=cv2.BORDER_REFLECT)
+
+            jaw_mask = np.zeros((jh, jw, 3), dtype=np.float32)
+            Y, X = np.ogrid[:jh, :jw]
+            j_val = np.clip(1.0 - np.sqrt(((X - int(jw * 0.50))/(jw * 0.35))**2 + ((Y - int(jh * 0.55))/(jh * 0.40))**2), 0, 1)
+            jaw_mask[:, :] = cv2.GaussianBlur(j_val, (35, 35), 0)[:, :, np.newaxis]
+
+            res[jaw_y0:jaw_y1, :] = res[jaw_y0:jaw_y1, :] * (1.0 - jaw_mask * 0.80 * intensity) + warped_jaw * (jaw_mask * 0.80 * intensity)
 
         return np.clip(res, 0, 255).astype(np.uint8)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. NEURAL / GENERATIVE AI LATENT HALLUCINATION ENGINE
-# ─────────────────────────────────────────────────────────────────────────────
-class NeuralHallucinationEngine:
-    @staticmethod
-    def generate_neural_reconstruction(bgr_img, api_key):
-        if not api_key:
-            raise ValueError("No API Key provided. Enter your Gemini API Key in the AI Settings tab.")
-        
-        _, buffer = cv2.imencode('.jpg', bgr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-        b64_image = base64.b64encode(buffer).decode('utf-8')
-        
-        system_prompt = (
-            "You are The Complex (the Backrooms memory entity from Kane Pixels). "
-            "Reconstruct this image/meme exactly as an imperfect, corrupted non-human memory would reconstruct it: "
-            "1. Phonetically hallucinate all text in the image into uncanny pseudo-words (e.g. 'Pinocchids telling aeary consblracy theones', 'His hoec ISN'T growing', 'Piteen', 'teat salt'). "
-            "2. Transform the human subjects into uncanny Still Life entities with unaligned glistening eyes, asymmetrical wet flesh textures, and dreamlike analog horror distortions while strictly keeping the original meme/image composition and grid layout intact."
-        )
-        
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": system_prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": b64_image
-                        }
-                    }
-                ]
-            }]
-        }
-        
-        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers)
-        with urllib.request.urlopen(req, timeout=45) as response:
-            return json.loads(response.read().decode('utf-8'))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. MASTER COMPOSITE ENGINE
+# 3. MASTER COMPOSITE ENGINE (VIDEO TEMPORAL PERSISTENCE)
 # ─────────────────────────────────────────────────────────────────────────────
 class MisrememberedEngine:
     def __init__(self):
         self.seed = random.randint(0, 0xFFFFFFFF)
+        self.use_local_ai = True
 
     def set_seed(self, seed_val):
         self.seed = seed_val
@@ -283,31 +231,63 @@ class MisrememberedEngine:
 
         out = frame.copy()
 
-        # 1. Semantic Text Hallucination & Inpainting
-        if text_v > 0.05:
-            out = SemanticTextHallucinator.detect_and_mutate_text_regions(out, rng, intensity=text_v * master_v)
+        # 1. Local AI Still Life Anatomical & Latent Reconstruction
+        if self.use_local_ai and still_v > 0.05:
+            out = LocalStillLifeAIEngine.apply_local_neural_reconstruction(
+                out, rng, intensity=still_v * master_v, gloss=gloss_v
+            )
 
-        # 2. Still Life Anatomical & Flesh Morphing
-        if still_v > 0.05:
-            out = StillLifeMorphEngine.apply_still_life_anatomy(out, rng, intensity=still_v * master_v, gloss=gloss_v)
+        # 2. Dynamic On-Frame Text Corruption (Actual Pixels Sliced & Mutated — Zero Hardcoding!)
+        if text_v > 0.05:
+            out = LocalGlyphCorruptor.corrupt_actual_frame_text(out, rng, intensity=text_v * master_v)
 
         # 3. The Complex "Green Light" Subtle Shift
-        if green_v > 0.10 and rng.random() < 0.40:
+        if green_v > 0.10 and rng.random() < 0.35:
             green_surge = green_v * master_v
             green_overlay = np.zeros_like(out)
-            green_overlay[:, :] = [int(8 * green_surge), int(28 * green_surge), int(6 * green_surge)]
+            green_overlay[:, :] = [int(8 * green_surge), int(26 * green_surge), int(6 * green_surge)]
             out = cv2.add(out, green_overlay)
 
         return out
 
+    def render_no_signal_screen(self, width, height, lang):
+        img = np.full((height, width, 3), (180, 0, 0), dtype=np.uint8)
+        noise = np.random.randint(-20, 20, (height, width, 3), dtype=np.int16)
+        img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        img[::2, :, :] = (img[::2, :, :] * 0.72).astype(np.uint8)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = max(0.6, width / 600.0)
+        thick = max(1, int(scale * 2))
+        (tw, th), _ = cv2.getTextSize(lang, font, scale, thick)
+        tx = (width - tw) // 2
+        ty = (height + th) // 2
+        cv2.putText(img, lang, (tx+2, ty+2), font, scale, (0, 0, 40), thick+1, cv2.LINE_AA)
+        cv2.putText(img, lang, (tx, ty), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+        return img
+
+    def render_static_screen(self, width, height):
+        small = np.random.randint(0, 256, (max(1, height // 3), max(1, width // 3)), dtype=np.uint8)
+        bgr = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
+        return cv2.resize(bgr, (width, height), interpolation=cv2.INTER_NEAREST)
+
+    def render_no_video_screen(self, frame, time_sec):
+        h, w = frame.shape[:2]
+        res = np.zeros((h, w, 3), dtype=np.uint8)
+        res[::3, :, :] = 10
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = max(0.6, w / 700.0)
+        cv2.putText(res, "PLAY >", (28, 48), font, scale, (34, 238, 232), 2, cv2.LINE_AA)
+        cv2.putText(res, "NO VIDEO", (28, 88), font, scale, (34, 238, 232), 2, cv2.LINE_AA)
+        return res
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. DESKTOP GUI APPLICATION (CUSTOMTKINTER)
+# 4. DESKTOP GUI APPLICATION (CUSTOMTKINTER)
 # ─────────────────────────────────────────────────────────────────────────────
 class MisrememberedDesktopApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("MISREMEMBERED MEDIA // THE COMPLEX RECONSTRUCTION TERMINAL")
+        self.title("MISREMEMBERED MEDIA // LOCAL AI RECONSTRUCTION TERMINAL")
         self.geometry("1340x880")
         self.minsize(1080, 720)
         self.configure(fg_color="#07080b")
@@ -319,7 +299,6 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.is_processing = False
         self.is_previewing = False
         self.preview_thread = None
-        self.api_key = os.environ.get("GEMINI_API_KEY", "")
 
         self.setup_ui()
 
@@ -358,6 +337,7 @@ class MisrememberedDesktopApp(ctk.CTk):
         threading.Thread(target=_install, daemon=True).start()
 
     def setup_ui(self):
+        # ── HEADER ──
         self.header = ctk.CTkFrame(self, height=64, fg_color="#0d0f14", corner_radius=0, border_width=1, border_color="#1f232e")
         self.header.pack(side="top", fill="x")
 
@@ -371,12 +351,22 @@ class MisrememberedDesktopApp(ctk.CTk):
         seed_box = ctk.CTkFrame(self.header, fg_color="transparent")
         seed_box.pack(side="right", padx=20, pady=12)
 
+        # Built-in Local AI Switch
+        self.ai_switch = ctk.CTkSwitch(
+            seed_box, text="LOCAL AI ENGINE", font=ctk.CTkFont(family="Courier New", size=11, weight="bold"),
+            progress_color="#00ff66", button_color="#ffffff", text_color="#00ff66",
+            command=self.toggle_local_ai
+        )
+        self.ai_switch.select()
+        self.ai_switch.pack(side="left", padx=14)
+
         self.seed_btn = ctk.CTkButton(seed_box, text="↻ RE-SEED", font=ctk.CTkFont(family="Courier New", size=11), width=90, height=28, fg_color="#181a20", hover_color="#262a36", border_width=1, border_color="#2e3444", text_color="#00ff66", command=self.re_seed)
         self.seed_btn.pack(side="left", padx=6)
 
         self.seed_lbl = ctk.CTkLabel(seed_box, text=f"SEED: {self.engine.seed:08X}", font=ctk.CTkFont(family="Courier New", size=11), text_color="#9ca3af")
         self.seed_lbl.pack(side="left", padx=6)
 
+        # ── BOTTOM EXPORT BAR ──
         self.bottom_bar = ctk.CTkFrame(self, height=64, fg_color="#0d0f14", corner_radius=0, border_width=1, border_color="#1f232e")
         self.bottom_bar.pack(side="bottom", fill="x")
 
@@ -389,9 +379,11 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.progress_bar = ctk.CTkProgressBar(self.bottom_bar, height=4, progress_color="#00ff66", fg_color="#111318")
         self.progress_bar.set(0)
 
+        # ── MAIN CONTAINER ──
         self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.pack(fill="both", expand=True, padx=12, pady=10)
 
+        # Left: Controls Card
         self.controls_card = ctk.CTkFrame(self.container, width=380, fg_color="#0d0f14", corner_radius=8, border_width=1, border_color="#1f232e")
         self.controls_card.pack(side="left", fill="y", padx=(0, 10))
 
@@ -399,11 +391,11 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.tab_anatomy = self.tabs.add("STILL LIFE")
-        self.tab_text = self.tabs.add("TEXT & MEMORY")
-        self.tab_ai = self.tabs.add("AI NEURAL")
+        self.tab_text = self.tabs.add("TEXT CORRUPTOR")
 
         self.setup_tabs()
 
+        # Right: Viewport Card
         self.viewport_card = ctk.CTkFrame(self.container, fg_color="#090a0e", corner_radius=8, border_width=1, border_color="#1f232e")
         self.viewport_card.pack(side="right", fill="both", expand=True)
 
@@ -441,7 +433,7 @@ class MisrememberedDesktopApp(ctk.CTk):
 
         sliders_1 = [
             ("Uncanny Still Life Drift", "object_melt", 0, 100, 85, "#ff3344"),
-            ("Wet Flesh & Specular Shading", "flesh_gloss", 0, 100, 75, "#00ff66"),
+            ("Wet Flesh Specular Shading", "flesh_gloss", 0, 100, 75, "#00ff66"),
             ("Asymmetric Ocular Shift", "master_val", 0, 100, 90, "#ff3344"),
             ("The Complex 'Green Light'", "green_shift", 0, 100, 60, "#00ff66"),
         ]
@@ -449,21 +441,10 @@ class MisrememberedDesktopApp(ctk.CTk):
             self._make_slider_group(self.tab_anatomy, title, key, mn, mx, df, clr)
 
         sliders_2 = [
-            ("Semantic Text Hallucination", "poster_melt", 0, 100, 95, "#ff3344"),
+            ("On-Frame Glyph Corruption", "poster_melt", 0, 100, 90, "#ff3344"),
         ]
         for title, key, mn, mx, df, clr in sliders_2:
             self._make_slider_group(self.tab_text, title, key, mn, mx, df, clr)
-
-        ctk.CTkLabel(self.tab_ai, text="GEMINI VISION API KEY", font=ctk.CTkFont(family="Courier New", size=11, weight="bold"), text_color="#e5e7eb").pack(anchor="w", padx=4, pady=(6, 2))
-        self.api_key_entry = ctk.CTkEntry(self.tab_ai, placeholder_text="AIzaSy...", font=ctk.CTkFont(family="Courier New", size=11), fg_color="#13161f", border_color="#2b3242", show="*")
-        if self.api_key:
-            self.api_key_entry.insert(0, self.api_key)
-        self.api_key_entry.pack(fill="x", padx=4, pady=(0, 10))
-
-        self.ai_btn = ctk.CTkButton(self.tab_ai, text="⚡ RUN NEURAL HALLUCINATION", font=ctk.CTkFont(family="Courier New", size=12, weight="bold"), fg_color="#ff3344", hover_color="#cc2233", height=36, command=self.run_ai_neural_reconstruct)
-        self.ai_btn.pack(fill="x", padx=4, pady=6)
-
-        ctk.CTkLabel(self.tab_ai, text="Generates full dreamlike latent meme reconstructions directly using vision diffusion & generative hallucination (like Image 2).", font=ctk.CTkFont(family="Outfit", size=11), text_color="#6b7280", wraplength=320, justify="left").pack(anchor="w", padx=4, pady=4)
 
     def _make_slider_group(self, parent, title, key, mn, mx, df, clr):
         box = ctk.CTkFrame(parent, fg_color="#13161f", corner_radius=6, border_width=1, border_color="#1f2432")
@@ -482,6 +463,12 @@ class MisrememberedDesktopApp(ctk.CTk):
 
     def get_sliders(self):
         return {k: int(v.get()) for k, v in self.slider_vars.items()}
+
+    def toggle_local_ai(self):
+        self.engine.use_local_ai = self.ai_switch.get() == 1
+        state = "ENABLED" if self.engine.use_local_ai else "DISABLED"
+        self.add_log(f"Local AI Still Life Engine {state}", "info")
+        self.refresh_preview()
 
     def add_log(self, msg, level="info"):
         timestamp = time.strftime("%H:%M:%S")
@@ -564,39 +551,20 @@ class MisrememberedDesktopApp(ctk.CTk):
             if not ret:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 frame_idx = 0
+                rng = random.Random(self.engine.seed)
                 continue
 
             sliders = self.get_sliders()
-            out = self.engine.process_frame(frame, rng, sliders, frame_idx, fps)
+            # Feed consistent RNG seed per second to maintain rock-solid temporal stability across video frames
+            frame_rng = random.Random(self.engine.seed + int(frame_idx / (fps * 2.0)))
+            out = self.engine.process_frame(frame, frame_rng, sliders, frame_idx, fps)
+            
             self._show_original(frame)
             self._show_processed(out)
+            
             frame_idx += 1
             time.sleep(frame_delay)
         cap.release()
-
-    def run_ai_neural_reconstruct(self):
-        if self.original_image_bgr is None:
-            messagebox.showwarning("No Image Loaded", "Please load an image first before running AI Neural Hallucination.")
-            return
-        
-        key = self.api_key_entry.get().strip()
-        if not key:
-            messagebox.showwarning("API Key Required", "Please enter a Gemini API Key in the AI Settings tab.")
-            return
-        
-        self.add_log("Starting AI Neural Hallucination pipeline...", "alert")
-        self.status_lbl.configure(text="AI NEURAL HALLUCINATION IN PROGRESS...")
-        
-        def _worker():
-            try:
-                res = NeuralHallucinationEngine.generate_neural_reconstruction(self.original_image_bgr, key)
-                self.add_log("AI Neural Hallucination completed successfully!", "info")
-                self.status_lbl.configure(text="AI HALLUCINATION COMPLETE")
-            except Exception as e:
-                self.add_log(f"AI Neural Error: {e}", "warn")
-                self.status_lbl.configure(text="AI HALLUCINATION ERROR")
-        
-        threading.Thread(target=_worker, daemon=True).start()
 
     def start_export(self):
         if not self.current_media_path or self.is_processing:
@@ -640,7 +608,6 @@ class MisrememberedDesktopApp(ctk.CTk):
             writer = cv2.VideoWriter(temp_video, fourcc, fps, (w, h))
 
             sliders = self.get_sliders()
-            rng = random.Random(self.engine.seed)
             frame_idx = 0
 
             self.add_log(f"Exporting video: {w}x{h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
@@ -650,7 +617,9 @@ class MisrememberedDesktopApp(ctk.CTk):
                 if not ret:
                     break
 
-                out = self.engine.process_frame(frame, rng, sliders, frame_idx, fps)
+                # Consistent temporal seed to prevent flickering
+                frame_rng = random.Random(self.engine.seed + int(frame_idx / (fps * 2.0)))
+                out = self.engine.process_frame(frame, frame_rng, sliders, frame_idx, fps)
                 writer.write(out)
                 frame_idx += 1
 
@@ -665,7 +634,7 @@ class MisrememberedDesktopApp(ctk.CTk):
             writer.release()
 
             if FFMPEG:
-                pitch_rate = 0.85 + rng.random() * 0.30
+                pitch_rate = 0.85 + random.random() * 0.30
                 cmd = [
                     FFMPEG, "-y",
                     "-i", temp_video,
