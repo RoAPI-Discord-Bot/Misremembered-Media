@@ -461,9 +461,12 @@ class LocalGlyphCorruptor:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. STILL LIFE ANATOMICAL RECONSTRUCTION ENGINE
-# Note: Deterministic Computer Vision pipeline (YCrCb segmentation,
-# high-frequency specular flesh shading, asymmetric ocular drift, multi-jaw warp)
+# 3. 2023 EARLY AI LATENT HALLUCINATION & STILL LIFE ENGINE
+# Full replication of 2023 early AI latent space distortions (Pinocchio / VQGAN style):
+# - Multi-scale spatial latent flow vector displacement
+# - Wet clay & charred molten flesh shading with deep pore/wrinkle specular sheen
+# - Incandescent glowing eye/nose cavities
+# - Asymmetric ocular and molten jaw distortion
 # ─────────────────────────────────────────────────────────────────────────────
 class LocalStillLifeEngine:
     @staticmethod
@@ -471,67 +474,88 @@ class LocalStillLifeEngine:
         h, w = bgr_img.shape[:2]
         res = bgr_img.copy().astype(np.float32)
 
-        # 1. Subject segmentation in YCrCb color space
-        ycrcb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2YCrCb)
-        skin_mask = cv2.inRange(ycrcb, np.array([0, 133, 77]), np.array([255, 173, 127]))
+        # 1. Multi-scale Latent Flow Distortion (Simulates 2023 latent space noise warping)
+        grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
+        
+        noise_small_x = rng.uniform(-1, 1) * cv2.GaussianBlur(np.random.normal(0, 1, (max(4, h//16), max(4, w//16))).astype(np.float32), (9, 9), 0)
+        noise_small_y = rng.uniform(-1, 1) * cv2.GaussianBlur(np.random.normal(0, 1, (max(4, h//16), max(4, w//16))).astype(np.float32), (9, 9), 0)
+        
+        flow_x = cv2.resize(noise_small_x, (w, h), interpolation=cv2.INTER_CUBIC) * (w * 0.040 * intensity)
+        flow_y = cv2.resize(noise_small_y, (w, h), interpolation=cv2.INTER_CUBIC) * (h * 0.048 * intensity)
+        
+        map_x = np.clip(grid_x + flow_x, 0, w - 1).astype(np.float32)
+        map_y = np.clip(grid_y + flow_y, 0, h - 1).astype(np.float32)
+        warped_latent = cv2.remap(res, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
-        if np.sum(skin_mask) < (w * h * 0.02 * 255):
+        # 2. Subject Skin & Organic Flesh Segmentation
+        ycrcb = cv2.cvtColor(np.clip(warped_latent, 0, 255).astype(np.uint8), cv2.COLOR_BGR2YCrCb)
+        skin_mask = cv2.inRange(ycrcb, np.array([0, 130, 75]), np.array([255, 178, 130]))
+
+        if np.sum(skin_mask) < (w * h * 0.03 * 255):
             Y, X = np.ogrid[:h, :w]
-            cx, cy = w // 2, int(h * 0.45)
-            dist_from_center = np.sqrt((X - cx)**2 + (Y - cy)**2)
-            skin_mask = np.clip(255 - (dist_from_center / (max(w, h) * 0.45) * 255), 0, 255).astype(np.uint8)
+            cx, cy = w // 2, int(h * 0.48)
+            dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
+            skin_mask = np.clip(255 - (dist / (max(w, h) * 0.50) * 255), 0, 255).astype(np.uint8)
 
-        mask_blur = cv2.GaussianBlur(skin_mask, (25, 25), 0).astype(np.float32) / 255.0
+        mask_f = cv2.GaussianBlur(skin_mask, (31, 31), 0).astype(np.float32) / 255.0
 
-        # 2. Wet Flesh & Specular Shading (High-contrast gloss)
-        if gloss > 0.05:
-            gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
-            blur = cv2.GaussianBlur(gray, (0, 0), 3)
-            high_freq = np.clip(gray - blur, -35, 35)
-            specular = np.clip((gray / 255.0)**3 * 140 * gloss, 0, 95)
+        # 3. 2023 Wet Clay & Charred Molten Shading (The "Piteen / Teat Salt" Look)
+        gray = cv2.cvtColor(np.clip(warped_latent, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
+        blur_g = cv2.GaussianBlur(gray, (0, 0), 4)
+        high_pass_texture = np.clip(gray - blur_g, -45, 45)
+        specular_sheen = np.clip(((gray / 255.0) ** 3.5) * 220.0 * gloss, 0, 140)
 
-            for c in range(3):
-                res[:, :, c] = res[:, :, c] + (high_freq * 1.4 * gloss + specular) * mask_blur
+        dark_clay_tint = np.zeros_like(warped_latent)
+        dark_clay_tint[:, :, 0] = -35 * intensity # Reduce Blue
+        dark_clay_tint[:, :, 1] = -15 * intensity # Slight Green drop
+        dark_clay_tint[:, :, 2] = 20 * intensity  # Warm Red boost
 
-        # 3. Asymmetrical Upper Feature / Eye Drift
-        eye_y0, eye_y1 = int(h * 0.12), int(h * 0.48)
-        eye_region = res[eye_y0:eye_y1, :].copy()
+        for c in range(3):
+            flesh_channel = warped_latent[:, :, c] + (high_pass_texture * 1.8 * gloss + specular_sheen + dark_clay_tint[:, :, c])
+            warped_latent[:, :, c] = warped_latent[:, :, c] * (1.0 - mask_f) + np.clip(flesh_channel, 0, 255) * mask_f
 
-        if eye_region.shape[0] > 10:
-            eh, ew = eye_region.shape[:2]
-            shift_x = int(w * 0.022 * intensity)
-            shift_y = -int(h * 0.030 * intensity)
+        # 4. Molten Glowing Eye/Nose Cavities (Incandescent burning eyes)
+        if intensity > 0.40 and rng.random() < 0.85:
+            eye_y0, eye_y1 = int(h * 0.18), int(h * 0.46)
+            eye_x0, eye_x1 = int(w * 0.22), int(w * 0.78)
+            cavity_h = eye_y1 - eye_y0
+            cavity_w = eye_x1 - eye_x0
+            
+            if cavity_h > 5 and cavity_w > 5:
+                Y, X = np.ogrid[:cavity_h, :cavity_w]
+                left_eye_dist = np.sqrt((X - int(cavity_w * 0.28))**2 + ((Y - cavity_h//2)*1.4)**2)
+                right_eye_dist = np.sqrt((X - int(cavity_w * 0.72))**2 + ((Y - cavity_h//2)*1.4)**2)
+                
+                glow_rad = max(10, int(cavity_w * 0.18))
+                glow_l = np.clip(1.0 - (left_eye_dist / glow_rad), 0, 1) ** 2
+                glow_r = np.clip(1.0 - (right_eye_dist / glow_rad), 0, 1) ** 2
+                glow_total = np.clip(glow_l + glow_r, 0, 1)[:, :, np.newaxis]
+                
+                amber_flare = np.zeros((cavity_h, cavity_w, 3), dtype=np.float32)
+                amber_flare[:, :] = [15, 190, 255]
+                
+                warped_latent[eye_y0:eye_y1, eye_x0:eye_x1] = (
+                    warped_latent[eye_y0:eye_y1, eye_x0:eye_x1] * (1.0 - glow_total * 0.60 * intensity) +
+                    amber_flare * (glow_total * 0.60 * intensity)
+                )
 
-            M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-            warped_eyes = cv2.warpAffine(eye_region, M, (ew, eh), borderMode=cv2.BORDER_REFLECT)
-
-            eye_mask = np.zeros((eh, ew, 3), dtype=np.float32)
-            Y, X = np.ogrid[:eh, :ew]
-            val = np.clip(1.0 - np.sqrt(((X - int(ew * 0.55))/(ew * 0.35))**2 + ((Y - eh // 2)/(eh * 0.45))**2), 0, 1)
-            eye_mask[:, :] = cv2.GaussianBlur(val, (25, 25), 0)[:, :, np.newaxis]
-
-            res[eye_y0:eye_y1, :] = res[eye_y0:eye_y1, :] * (1.0 - eye_mask * 0.85 * intensity) + warped_eyes * (eye_mask * 0.85 * intensity)
-
-        # 4. Multi-Jaw & Secondary Mouth Layering
-        jaw_y0, jaw_y1 = int(h * 0.38), int(h * 0.85)
-        jaw_region = res[jaw_y0:jaw_y1, :].copy()
-
+        # 5. Molten Asymmetric Jaw & Mouth Distortion
+        jaw_y0, jaw_y1 = int(h * 0.48), int(h * 0.88)
+        jaw_region = warped_latent[jaw_y0:jaw_y1, :].copy()
         if jaw_region.shape[0] > 10:
             jh, jw = jaw_region.shape[:2]
-            angle_dx = int(w * 0.035 * intensity)
-            angle_dy = int(h * 0.042 * intensity)
-
-            M_jaw = np.float32([[1, 0, angle_dx], [0, 1, angle_dy]])
-            warped_jaw = cv2.warpAffine(jaw_region, M_jaw, (jw, jh), borderMode=cv2.BORDER_REFLECT)
-
-            jaw_mask = np.zeros((jh, jw, 3), dtype=np.float32)
+            shift_dx = int(w * 0.038 * intensity)
+            shift_dy = int(h * 0.044 * intensity)
+            M_jaw = np.float32([[1, 0, shift_dx], [0, 1, shift_dy]])
+            jaw_warped = cv2.warpAffine(jaw_region, M_jaw, (jw, jh), borderMode=cv2.BORDER_REFLECT)
+            
             Y, X = np.ogrid[:jh, :jw]
-            j_val = np.clip(1.0 - np.sqrt(((X - int(jw * 0.50))/(jw * 0.35))**2 + ((Y - int(jh * 0.55))/(jh * 0.40))**2), 0, 1)
-            jaw_mask[:, :] = cv2.GaussianBlur(j_val, (25, 25), 0)[:, :, np.newaxis]
+            j_mask = np.clip(1.0 - np.sqrt(((X - jw//2)/(jw * 0.38))**2 + ((Y - int(jh * 0.5))/(jh * 0.45))**2), 0, 1)
+            j_mask = cv2.GaussianBlur(j_mask, (25, 25), 0)[:, :, np.newaxis]
+            
+            warped_latent[jaw_y0:jaw_y1, :] = warped_latent[jaw_y0:jaw_y1, :] * (1.0 - j_mask * 0.75 * intensity) + jaw_warped * (j_mask * 0.75 * intensity)
 
-            res[jaw_y0:jaw_y1, :] = res[jaw_y0:jaw_y1, :] * (1.0 - jaw_mask * 0.80 * intensity) + warped_jaw * (jaw_mask * 0.80 * intensity)
-
-        return np.clip(res, 0, 255).astype(np.uint8)
+        return np.clip(warped_latent, 0, 255).astype(np.uint8)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -782,15 +806,6 @@ class MisrememberedDesktopApp(ctk.CTk):
         seed_box = ctk.CTkFrame(self.header, fg_color="transparent")
         seed_box.pack(side="right", padx=20, pady=12)
 
-        # Still Life Engine Switch
-        self.still_life_switch = ctk.CTkSwitch(
-            seed_box, text="STILL LIFE RECONSTRUCTION", font=ctk.CTkFont(family="Courier New", size=11, weight="bold"),
-            progress_color="#00ff66", button_color="#ffffff", text_color="#00ff66",
-            command=self.toggle_still_life
-        )
-        self.still_life_switch.select()
-        self.still_life_switch.pack(side="left", padx=14)
-
         self.seed_btn = ctk.CTkButton(seed_box, text="↻ RE-SEED", font=ctk.CTkFont(family="Courier New", size=11), width=90, height=28, fg_color="#181a20", hover_color="#262a36", border_width=1, border_color="#2e3444", text_color="#00ff66", command=self.re_seed)
         self.seed_btn.pack(side="left", padx=6)
 
@@ -821,7 +836,7 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.tabs = ctk.CTkTabview(self.controls_card, fg_color="transparent", segmented_button_fg_color="#13161f", segmented_button_selected_color="#ff3344", segmented_button_selected_hover_color="#cc2233")
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
 
-        self.tab_anatomy = self.tabs.add("STILL LIFE")
+        self.tab_anatomy = self.tabs.add("2023 STILL LIFE")
         self.tab_text = self.tabs.add("FORGETS TEXT")
         self.tab_audio = self.tabs.add("KANE AUDIO")
 
@@ -863,10 +878,23 @@ class MisrememberedDesktopApp(ctk.CTk):
     def setup_tabs(self):
         self.slider_vars = {}
 
+        # ── 2023 STILL LIFE TAB ──
+        switch_frame = ctk.CTkFrame(self.tab_anatomy, fg_color="#181c26", corner_radius=6, border_width=1, border_color="#2b3242")
+        switch_frame.pack(fill="x", pady=(2, 8), padx=2)
+
+        self.still_life_switch = ctk.CTkSwitch(
+            switch_frame, text="2023 AI LATENT ENGINE", font=ctk.CTkFont(family="Courier New", size=12, weight="bold"),
+            progress_color="#00ff66", button_color="#ffffff", text_color="#00ff66",
+            command=self.toggle_still_life
+        )
+        self.still_life_switch.select()
+        self.still_life_switch.pack(side="top", anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkLabel(switch_frame, text="Latent space flow, molten flesh & incandescent glow", font=ctk.CTkFont(family="Courier New", size=9), text_color="#9ca3af").pack(side="top", anchor="w", padx=10, pady=(0, 8))
+
         sliders_1 = [
-            ("Uncanny Still Life Drift", "object_melt", 0, 100, 85, "#ff3344"),
-            ("Wet Flesh Specular Shading", "flesh_gloss", 0, 100, 75, "#00ff66"),
-            ("Asymmetric Ocular Shift", "master_val", 0, 100, 90, "#ff3344"),
+            ("2023 Latent Space Flow & Melt", "object_melt", 0, 100, 85, "#ff3344"),
+            ("Wet Clay & Molten Specular Gloss", "flesh_gloss", 0, 100, 80, "#00ff66"),
+            ("Incandescent Cavity Glow & Shift", "master_val", 0, 100, 90, "#ff3344"),
             ("The Green Light Pause & Cracks", "green_shift", 0, 100, 70, "#00ff66"),
         ]
         for title, key, mn, mx, df, clr in sliders_1:
