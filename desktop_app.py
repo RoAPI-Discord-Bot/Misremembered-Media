@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.0.1-FULL-PIPELINE"
+APP_VERSION = "v4.0.2-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -1022,43 +1022,95 @@ class GenerationalDegradation:
 # Rubber-band warp hollows out facial geometry; radial caustic flares replace eyes.
 # ─────────────────────────────────────────────────────────────────────────────
 class FaceDistortionEngine:
-    _face_cascade = None
-    _eye_cascade  = None
-    _cascade_ok   = None   # None = not tried yet, True/False after first attempt
+    """
+    Face detection + rubber-band warp + glowing ocular flares.
+    OpenCV 5.0 dropped CascadeClassifier — uses FaceDetectorYN (YuNet ONNX) instead.
+    Downloads the ~320KB model file on first use and caches it to temp dir.
+    Falls back to skin-color YCrCb blob detection if the model can't be fetched.
+    """
+    _detector    = None   # cv2.FaceDetectorYN instance or None
+    _use_yunet   = None   # True = yunet loaded, False = skin fallback, None = not tried
+    _MODEL_URL   = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+    _MODEL_CACHE = os.path.join(tempfile.gettempdir(), "yunet_face_2023mar.onnx")
 
     @classmethod
-    def _ensure_cascades(cls):
-        if cls._cascade_ok is not None:
-            return cls._cascade_ok
+    def _ensure_detector(cls, input_w, input_h):
+        """
+        Initialize face detector. Returns True if a detector is ready, False if not.
+        Tries in order: YuNet ONNX (cv2.FaceDetectorYN), then marks skin-fallback mode.
+        """
+        if cls._use_yunet is not None:
+            # Already initialized — update input size if using YuNet
+            if cls._use_yunet and cls._detector is not None:
+                try:
+                    cls._detector.setInputSize((input_w, input_h))
+                except Exception:
+                    pass
+            return True   # either yunet or skin-fallback is ready
+
+        # ── Try to load YuNet ONNX ──
         try:
-            # OpenCV 5.x moved CascadeClassifier into cv2.objdetect; OpenCV 4.x has it at cv2.
-            _CC = getattr(cv2, 'CascadeClassifier', None)
-            if _CC is None:
-                _CC = getattr(getattr(cv2, 'objdetect', None), 'CascadeClassifier', None)
-            if _CC is None:
-                raise AttributeError("CascadeClassifier not in cv2 or cv2.objdetect")
+            _YN = getattr(cv2, 'FaceDetectorYN_create', None)
+            if _YN is None:
+                raise AttributeError("FaceDetectorYN_create not in cv2")
 
-            # Haarcascades path: try cv2.data.haarcascades, fall back to empty string
-            _hc = ''
-            try:
-                _hc = cv2.data.haarcascades  # works on most OpenCV builds
-            except AttributeError:
-                pass
+            # Download model if not cached
+            model_path = cls._MODEL_CACHE
+            if not os.path.exists(model_path) or os.path.getsize(model_path) < 10000:
+                dbg(f"Downloading YuNet face model ({cls._MODEL_URL})...", "FACE")
+                try:
+                    urllib.request.urlretrieve(cls._MODEL_URL, model_path)
+                    dbg(f"YuNet model downloaded: {os.path.getsize(model_path)} bytes", "FACE")
+                except Exception as dl_err:
+                    dbg(f"YuNet model download failed: {dl_err} — using skin-fallback", "FACE")
+                    cls._use_yunet = False
+                    return True
 
-            fp = _hc + 'haarcascade_frontalface_default.xml'
-            ep = _hc + 'haarcascade_eye.xml'
-            cls._face_cascade = _CC(fp)
-            cls._eye_cascade  = _CC(ep)
-            if cls._face_cascade.empty():
-                dbg("Face cascade empty — face distortion disabled", "FACE")
-                cls._cascade_ok = False
-            else:
-                dbg(f"Face+eye Haar cascades loaded OK (cv2 v{cv2.__version__})", "FACE")
-                cls._cascade_ok = True
+            if not os.path.exists(model_path) or os.path.getsize(model_path) < 10000:
+                cls._use_yunet = False
+                return True
+
+            cls._detector = _YN(
+                model_path, "",
+                (input_w, input_h),
+                score_threshold=0.60,
+                nms_threshold=0.30,
+                top_k=10
+            )
+            cls._use_yunet = True
+            dbg(f"YuNet face detector loaded OK (cv2 {cv2.__version__})", "FACE")
+
         except Exception as e:
-            dbg(f"Haar cascade load error: {e}", "FACE")
-            cls._cascade_ok = False
-        return cls._cascade_ok
+            dbg(f"YuNet init failed: {e} — using skin-color fallback", "FACE")
+            cls._use_yunet = False
+
+        return True
+
+    @staticmethod
+    def _detect_faces_skin(bgr_img):
+        """
+        Skin-color blob fallback: YCrCb thresholding → find large flesh-toned blobs.
+        Returns list of (x, y, w, h) similar to haar/yunet output.
+        """
+        h, w = bgr_img.shape[:2]
+        ycrcb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2YCrCb)
+        # Standard skin range in YCrCb
+        skin = cv2.inRange(ycrcb, (0, 133, 77), (255, 173, 127))
+        skin = cv2.morphologyEx(skin, cv2.MORPH_CLOSE, np.ones((12, 12), np.uint8))
+        skin = cv2.morphologyEx(skin, cv2.MORPH_OPEN,  np.ones((6,  6),  np.uint8))
+        contours, _ = cv2.findContours(skin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        faces = []
+        frame_area = w * h
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < frame_area * 0.006 or area > frame_area * 0.55:
+                continue
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            aspect = bw / max(bh, 1)
+            if aspect < 0.35 or aspect > 2.2:
+                continue
+            faces.append((bx, by, bw, bh))
+        return faces[:4]
 
     @staticmethod
     def _rubber_band_warp(patch, rng, intensity):
@@ -1070,11 +1122,8 @@ class FaceDistortionEngine:
         Y, X = np.mgrid[0:bh, 0:bw].astype(np.float32)
         dx = X - cx
         dy = Y - cy
-        dist = np.sqrt(dx**2 + dy**2) + 0.001
-        norm_dist = dist / max(cx, cy)
-        warp_amt = intensity * rng.uniform(0.10, 0.28)
-        # Non-linear radial: outer ring stretches, inner compresses
-        radial = 1.0 + warp_amt * (norm_dist ** 1.6)
+        norm_dist = np.sqrt(dx**2 + dy**2) / max(cx, cy)
+        radial = 1.0 + intensity * rng.uniform(0.10, 0.28) * (norm_dist ** 1.6)
         src_x = np.clip(cx + dx * radial + rng.uniform(-bw*0.03, bw*0.03)*intensity, 0, bw-1).astype(np.float32)
         src_y = np.clip(cy + dy * radial + rng.uniform(-bh*0.025, bh*0.025)*intensity, 0, bh-1).astype(np.float32)
         return cv2.remap(patch, src_x, src_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
@@ -1084,93 +1133,85 @@ class FaceDistortionEngine:
         """Additive radial caustic flare over an eye center point."""
         flare = np.zeros_like(canvas, dtype=np.uint8)
         r = max(3, r)
-        if color_mode == 'red':
-            cols = [(0, 20, 80), (0, 0, 180), (0, 0, 240), (80, 100, 255)]
-        else:
-            cols = [(0, 50, 80), (0, 150, 220), (0, 210, 255), (100, 240, 255)]
+        cols = [(0, 20, 80), (0, 0, 180), (0, 0, 240), (80, 100, 255)] if color_mode == 'red' \
+               else [(0, 50, 80), (0, 150, 220), (0, 210, 255), (100, 240, 255)]
         for i, col in enumerate(cols):
             cv2.circle(flare, (cx, cy), max(1, r * (4 - i)), col, -1, cv2.LINE_AA)
-        # Central overburn
         cv2.circle(flare, (cx, cy), max(1, r // 3), (200, 230, 255), -1, cv2.LINE_AA)
-        # Horizontal lens streak
-        streak_l = r * 5
-        cv2.line(flare, (cx - streak_l, cy), (cx + streak_l, cy), cols[2], max(1, r // 3), cv2.LINE_AA)
+        cv2.line(flare, (cx - r*5, cy), (cx + r*5, cy), cols[2], max(1, r // 3), cv2.LINE_AA)
         return cv2.add(canvas, flare)
 
     @staticmethod
     def apply(bgr_img, rng, intensity=0.80):
-        if intensity < 0.05 or not FaceDistortionEngine._ensure_cascades():
+        if intensity < 0.05:
             return bgr_img
 
         h, w = bgr_img.shape[:2]
-        # Detect at quarter resolution for speed
-        scale = 4
-        small = cv2.resize(bgr_img, (w // scale, h // scale))
-        gray_s = cv2.equalizeHist(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
+        FaceDistortionEngine._ensure_detector(w, h)
 
+        # Detect faces
         faces = []
         try:
-            # flags=cv2.CASCADE_SCALE_IMAGE may not exist in OpenCV 5 — try without it too
-            _flags = getattr(cv2, 'CASCADE_SCALE_IMAGE', None)
-            if _flags is not None:
-                faces = FaceDistortionEngine._face_cascade.detectMultiScale(
-                    gray_s, scaleFactor=1.12, minNeighbors=4, minSize=(18, 18), flags=_flags
-                )
+            if FaceDistortionEngine._use_yunet and FaceDistortionEngine._detector is not None:
+                # YuNet: detect() returns (nfaces, Nx15 array) with cols [x,y,w,h, ...]
+                FaceDistortionEngine._detector.setInputSize((w, h))
+                _, detections = FaceDistortionEngine._detector.detect(bgr_img)
+                if detections is not None:
+                    for d in detections:
+                        fx, fy, fw, fh = int(d[0]), int(d[1]), int(d[2]), int(d[3])
+                        faces.append((fx, fy, fw, fh))
             else:
-                faces = FaceDistortionEngine._face_cascade.detectMultiScale(
-                    gray_s, scaleFactor=1.12, minNeighbors=4, minSize=(18, 18)
-                )
+                # Skin-color blob fallback
+                faces = FaceDistortionEngine._detect_faces_skin(bgr_img)
         except Exception as e:
-            dbg(f"detectMultiScale error: {e}", "FACE")
+            dbg(f"Face detect error: {e}", "FACE")
             return bgr_img
-        if len(faces) == 0:
+
+        if not faces:
             return bgr_img
 
         out = bgr_img.copy()
         color_mode = rng.choice(['red', 'yellow'])
 
         for (fx, fy, fw, fh) in faces:
-            fx, fy, fw, fh = fx*scale, fy*scale, fw*scale, fh*scale
-            fx = max(0, min(w-fw, fx)); fy = max(0, min(h-fh, fy))
-            fw = min(fw, w-fx);         fh = min(fh, h-fy)
+            fx = max(0, min(w - 1, fx)); fy = max(0, min(h - 1, fy))
+            fw = min(fw, w - fx);        fh = min(fh, h - fy)
             if fw < 12 or fh < 12:
                 continue
 
             roi = out[fy:fy+fh, fx:fx+fw].copy()
-
-            # Rubber-band distort
             warped = FaceDistortionEngine._rubber_band_warp(roi, rng, intensity)
             pad = max(4, min(fw, fh) // 7)
             mask = np.zeros((fh, fw), dtype=np.float32)
             mask[pad:-pad, pad:-pad] = 1.0
             mask = cv2.GaussianBlur(mask, (pad*2+1, pad*2+1), 0)[:, :, np.newaxis]
+            blend_amt = min(0.90, intensity)
             out[fy:fy+fh, fx:fx+fw] = np.clip(
-                roi.astype(np.float32) * (1 - mask * min(0.90, intensity)) +
-                warped.astype(np.float32) * (mask * min(0.90, intensity)), 0, 255
+                roi.astype(np.float32) * (1 - mask * blend_amt) +
+                warped.astype(np.float32) * (mask * blend_amt), 0, 255
             ).astype(np.uint8)
 
-            # Eye detection in upper 60% of face ROI
-            face_gray = cv2.cvtColor(out[fy:fy+int(fh*0.65), fx:fx+fw], cv2.COLOR_BGR2GRAY)
-            eyes_found = []
-            try:
-                if FaceDistortionEngine._eye_cascade is not None and not FaceDistortionEngine._eye_cascade.empty():
-                    eyes_found = FaceDistortionEngine._eye_cascade.detectMultiScale(
-                        face_gray, scaleFactor=1.1, minNeighbors=3, minSize=(8, 8)
-                    )
-            except Exception:
-                eyes_found = []
-            if len(eyes_found) > 0:
-                for (ex, ey, ew, eh) in eyes_found[:2]:
-                    out = FaceDistortionEngine._eye_flare(
-                        out, fx + ex + ew//2, fy + ey + eh//2,
-                        max(3, int(ew*0.38)), color_mode
-                    )
+            # YuNet face box columns 4-13 are 5 landmark points (x,y pairs):
+            # right_eye, left_eye, nose_tip, right_mouth, left_mouth
+            # Use them for precise eye flare placement if available
+            if FaceDistortionEngine._use_yunet:
+                try:
+                    # We don't have the raw detection row here, estimate from geometry
+                    # Right eye ≈ 30% from left, Left eye ≈ 70% from left, at 35% height
+                    ey_y = fy + int(fh * 0.35)
+                    for ex_frac in [0.30, 0.70]:
+                        out = FaceDistortionEngine._eye_flare(
+                            out, fx + int(fw * ex_frac), ey_y,
+                            max(3, int(fw * 0.07)), color_mode
+                        )
+                except Exception:
+                    pass
             else:
-                # Fallback: estimate eye positions via rule-of-thirds
-                ey_center = fy + int(fh * 0.38)
+                # Skin fallback: estimate eyes from face geometry
+                ey_y = fy + int(fh * 0.35)
                 for ex_frac in [0.30, 0.70]:
                     out = FaceDistortionEngine._eye_flare(
-                        out, fx + int(fw * ex_frac), ey_center,
+                        out, fx + int(fw * ex_frac), ey_y,
                         max(3, int(fw * 0.07)), color_mode
                     )
 
