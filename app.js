@@ -1,12 +1,14 @@
 /**
  * MISREMEMBERED MEDIA // Uncanny Media Reconstruction Engine
  * Media corruption, periodic reality shifts, weighted audio pitch intervals (20%/45%/35%),
- * and static image feature duplication (angled displacement SpongeBob effect).
+ * and Kane Pixels 'Forgets' text distortion engine.
  */
+
+const APP_VERSION = 'v2.5.0';
 
 document.addEventListener('DOMContentLoaded', () => {
 
-    console.log('%c[MISREMEMBERED MEDIA] Engine Initialization Started', 'color: #00ff66; font-weight: bold; font-size: 14px;');
+    console.log(`%c[MISREMEMBERED MEDIA] Engine Initialization Started (${APP_VERSION})`, 'color: #00ff66; font-weight: bold; font-size: 14px;');
 
     // --- DOM ELEMENT REFERENCES ---
     const dropZone = document.getElementById('dropZone');
@@ -1293,12 +1295,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     const colorDist = Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
                     const lumDiff = Math.abs(lum - bgLum);
 
-                    const threshold = 18;
+                    const threshold = 14;
                     if (colorDist < threshold && lumDiff < threshold) {
                         d[idx + 3] = 0; // 100% transparent background (eliminates wallpaper boxes!)
                     } else {
-                        // Smooth edge anti-aliasing
-                        const factor = Math.min(1.0, Math.max(0.0, (Math.max(colorDist, lumDiff) - threshold) / 16));
+                        // Keep text stroke visible with smooth edge feathering
+                        const factor = Math.min(1.0, Math.max(0.0, (Math.max(colorDist, lumDiff) - threshold) / 10));
                         d[idx + 3] = Math.round(255 * factor);
                     }
                 }
@@ -1314,7 +1316,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // High-speed Connected Component & Word Line Segmenter + AI OCR integration
     function scanForWordsAndGlyphs(w, h) {
-        detectedWordEntities = [];
+        const prevEntities = detectedWordEntities;
+        const newEntities = [];
         textCandidateBlocks = [];
 
         try {
@@ -1324,6 +1327,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // 1. Line density histogram to find horizontal text lines
             const rowDiffs = new Float32Array(h);
+            let totalDiff = 0;
             for (let y = 0; y < h; y++) {
                 let diffSum = 0;
                 for (let x = 8; x < w - 8; x += 4) {
@@ -1332,19 +1336,23 @@ document.addEventListener('DOMContentLoaded', () => {
                     diffSum += Math.abs(lum(idx1) - lum(idx2));
                 }
                 rowDiffs[y] = diffSum / (w / 4);
+                totalDiff += rowDiffs[y];
             }
+
+            const avgDiff = totalDiff / Math.max(1, h);
+            const rowThreshold = Math.max(3.8, avgDiff * 1.12);
 
             // Identify active text bands
             const textBands = [];
             let inBand = false;
             let startY = 0;
             for (let y = 0; y < h; y++) {
-                if (rowDiffs[y] > 12) {
+                if (rowDiffs[y] > rowThreshold) {
                     if (!inBand) { inBand = true; startY = y; }
                 } else {
                     if (inBand) {
                         inBand = false;
-                        if (y - startY >= 8 && y - startY <= 90) {
+                        if (y - startY >= 8 && y - startY <= 110) {
                             textBands.push({ startY: Math.max(0, startY - 4), endY: Math.min(h, y + 4) });
                         }
                     }
@@ -1376,7 +1384,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 let spaceGap = 0;
 
                 for (let x = 4; x < w - 4; x++) {
-                    const isCharCol = Math.abs(colDiffs[x] - avgBandLum) > 10;
+                    const isCharCol = Math.abs(colDiffs[x] - avgBandLum) > 7;
                     if (isCharCol) {
                         spaceGap = 0;
                         if (!inWord) { inWord = true; startX = x; }
@@ -1387,23 +1395,39 @@ document.addEventListener('DOMContentLoaded', () => {
                                 inWord = false;
                                 const endX = x - spaceGap;
                                 const ww = endX - startX;
-                                if (ww >= 12 && ww <= 500) {
+                                if (ww >= 10 && ww <= 550) {
+                                    // Check if this word already existed in previous scan to preserve mutation state
+                                    const existing = prevEntities.find(pe => 
+                                        Math.abs(pe.x - startX) < 25 && Math.abs(pe.y - band.startY) < 18
+                                    );
+
                                     const wordObj = {
-                                        id: 'word_' + Math.random().toString(36).substr(2, 6),
+                                        id: existing ? existing.id : 'word_' + Math.random().toString(36).substr(2, 6),
                                         x: startX,
                                         y: band.startY,
                                         w: ww,
                                         h: bh,
                                         glyphCanvas: extractPureGlyphCanvas(startX, band.startY, ww, bh),
-                                        originalText: '',
-                                        state: { floatingEcho: false, cascade: false, mirror: false, erased: false }
+                                        originalText: existing ? existing.originalText : '',
+                                        mutation: existing ? existing.mutation : null
                                     };
-                                    detectedWordEntities.push(wordObj);
+                                    newEntities.push(wordObj);
                                     textCandidateBlocks.push({ x: startX, y: band.startY, w: ww, h: bh, contrast: 40 });
                                 }
                             }
                         }
                     }
+                }
+            }
+
+            detectedWordEntities = newEntities;
+
+            // Automatically mutate 1-3 newly detected words so distortion is visible immediately
+            if (toggleMisrememberedText && toggleMisrememberedText.checked && detectedWordEntities.length > 0) {
+                const unmutated = detectedWordEntities.filter(wrd => !wrd.mutation);
+                const numToMutate = Math.min(unmutated.length, Math.max(1, Math.floor(detectedWordEntities.length * 0.45)));
+                for (let i = 0; i < numToMutate; i++) {
+                    mutateWordEntity(unmutated[i], w, h);
                 }
             }
 
@@ -1446,7 +1470,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ─── CORE SYSTEM: ENTITY MEMORY MODEL (Per-Entity Drift, Duplication, Rotation, & Erasure) ───
     let memoryEntities = [];
-    let insertedEntities = [];
     let globalDecayLevel = 0;
     let _wakeLock = null; // Screen Wake Lock handle (keeps mobile screen on during processing)
 
@@ -1748,13 +1771,28 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderMisrememberedText(ctx, canvasW, canvasH) {
         if (!detectedWordEntities.length) return;
 
+        // Ensure at least 1-3 words have active mutations
+        const mutated = detectedWordEntities.filter(w => w.mutation);
+        if (mutated.length === 0 && detectedWordEntities.length > 0) {
+            const count = Math.min(detectedWordEntities.length, Math.max(1, Math.floor(detectedWordEntities.length * 0.5)));
+            for (let i = 0; i < count; i++) {
+                mutateWordEntity(detectedWordEntities[i], canvasW, canvasH);
+            }
+        }
+
+        ctx.save();
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
+        ctx.shadowBlur = 4;
+        ctx.shadowOffsetX = 1;
+        ctx.shadowOffsetY = 1;
+
         for (const word of detectedWordEntities) {
             if (!word.mutation || !word.glyphCanvas) continue;
 
             const m = word.mutation;
             if (m.type === 'floating_echo') {
                 ctx.save();
-                ctx.globalAlpha = m.alpha;
+                ctx.globalAlpha = m.alpha || 0.90;
                 ctx.translate(m.destX + word.w / 2, m.destY + word.h / 2);
                 ctx.scale(-1, -1);
                 ctx.drawImage(word.glyphCanvas, -word.w / 2, -word.h / 2);
@@ -1764,7 +1802,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const destX = word.x + m.stepDx * s;
                     const destY = word.y + m.stepDy * s;
                     if (destX + word.w > canvasW || destY + word.h > canvasH) continue;
-                    const alpha = Math.max(0.08, 0.78 - s * 0.22);
+                    const alpha = Math.max(0.12, 0.85 - s * 0.22);
                     ctx.save();
                     ctx.globalAlpha = alpha;
                     const trimX = Math.min(word.w * 0.6, (s - 1) * (word.w / m.numSteps) * 0.6);
@@ -1777,13 +1815,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else if (m.type === 'glyph_flip') {
                 ctx.save();
-                ctx.globalAlpha = m.alpha;
+                ctx.globalAlpha = m.alpha || 0.88;
                 ctx.translate(word.x + m.charOffset + m.charW, word.y);
                 ctx.scale(-1, 1);
                 ctx.drawImage(word.glyphCanvas, m.charOffset, 0, m.charW, word.h, 0, 0, m.charW, word.h);
                 ctx.restore();
             }
         }
+        ctx.restore();
     }
 
     // --- VISUAL INTERRUPT EVENTS ---
@@ -2413,6 +2452,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Zero Flickering, 100% Stable) ---
         if (toggleMisrememberedText && toggleMisrememberedText.checked) {
+            if (now - lastTextScanTime > 2200 || detectedWordEntities.length === 0) {
+                lastTextScanTime = now;
+                scanForWordsAndGlyphs(w, h);
+            }
             renderMisrememberedText(ctx, w, h);
         }
 
@@ -3919,6 +3962,6 @@ document.addEventListener('DOMContentLoaded', () => {
     bindSlider(chromaticAberrationSlider, chromaticVal, 'px');
     bindSlider(pixelSliceSlider, pixelSliceVal, '%');
 
-    addLog('Misremembered Media Engine ready. Console debug statements active.', 'normal');
-    console.log('%c[MISREMEMBERED MEDIA] Ready for media upload & processing.', 'color: #00ff66; font-weight: bold;');
+    addLog(`[SYSTEM BOOT] Misremembered Media Engine ${APP_VERSION} online.`, 'alert');
+    console.log(`%c[MISREMEMBERED MEDIA] Engine ${APP_VERSION} ready for media upload & processing.`, 'color: #00ff66; font-weight: bold;');
 });
