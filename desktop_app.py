@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v3.2.0-TURBO"
+APP_VERSION = "v3.3.0"
 NO_SIGNAL_LANGS = [
     "Pas de signal", "Kein Signal", "Sin señal", "Nenhum sinal", "Geen signaal",
     "No Signal", "Brak sygnału", "Není signál", "Nincs jel", "Semnal lipsă",
@@ -27,6 +27,45 @@ NO_SIGNAL_LANGS = [
     "Нет сигнала", "Немає сигналу", "Nema signala", "Signāla nav", "Signalo nėra",
     "无信号", "信号なし", "신호 없음", "אין אות", "لا توجد إشارة",
 ]
+
+
+# External debug terminal — writes to a live tail'd log in a separate window
+_DEBUG_LOG = os.path.join(tempfile.gettempdir(), 'misremembered_debug.log')
+_dbg_lock = threading.Lock()
+
+def dbg(msg, tag='INFO'):
+    ts = time.strftime('%H:%M:%S.') + f'{int(time.time()*1000)%1000:03d}'
+    line = f'[{ts}] [{tag:<6}] {msg}\n'
+    print(line, end='', flush=True)
+    with _dbg_lock:
+        try:
+            open(_DEBUG_LOG, 'a', encoding='utf-8').write(line)
+        except Exception:
+            pass
+
+def _launch_debug_terminal():
+    try:
+        with open(_DEBUG_LOG, 'w', encoding='utf-8') as _f:
+            _f.write(f'=== MISREMEMBERED MEDIA {APP_VERSION} DEBUG ===\n')
+            _f.write(f'=== {time.strftime(chr(37)+chr(89)+-chr(109)+-chr(100)+chr(32)+chr(37)+chr(72)+chr(58)+chr(37)+chr(77)+chr(58)+chr(37)+chr(83))} ===\n\n')
+        lp = _DEBUG_LOG.replace(chr(92), chr(92)+chr(92))
+        ps = (
+            f"$f='{lp}';$pos=0;"
+            'while($true){'
+            '$s=New-Object IO.FileStream($f,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite);'
+            '$r=New-Object IO.StreamReader($s);'
+            '$s.Seek($pos,[IO.SeekOrigin]::Begin)|Out-Null;'
+            '$t=$r.ReadToEnd();'
+            'if($t){Write-Host $t -NoNewline};'
+            '$pos=$s.Length;$r.Close();$s.Close();'
+            'Start-Sleep -Milliseconds 150}'
+        )
+        subprocess.Popen(
+            ['powershell.exe', '-NoExit', '-Command', ps],
+            creationflags=subprocess.CREATE_NEW_CONSOLE
+        )
+    except Exception as e:
+        print(f'[DEBUG] Terminal error: {e}', file=sys.stderr)
 
 FFMPEG_LOCAL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "MisrememberedMedia", "ffmpeg")
 FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -248,16 +287,19 @@ class MisrememberedEngine:
         gloss_v  = sliders.get("flesh_gloss", 75) / 100.0
         green_v  = sliders.get("green_shift", 60) / 100.0
 
+        dbg(f'process_frame #{frame_idx} ai={self.use_local_ai} still={still_v:.2f} text={text_v:.2f}', 'FRAME')
         out = frame.copy()
 
         # 1. Local AI Still Life Anatomical & Latent Reconstruction
         if self.use_local_ai and still_v > 0.05:
+            dbg(f'  StillLifeAI intensity={still_v*master_v:.2f} gloss={gloss_v:.2f}', 'AI')
             out = LocalStillLifeAIEngine.apply_local_neural_reconstruction(
                 out, rng, intensity=still_v * master_v, gloss=gloss_v
             )
 
         # 2. Dynamic On-Frame Text Corruption (Fonts & Background Inpainting)
         if text_v > 0.05:
+            dbg(f'  GlyphCorrupt intensity={text_v*master_v:.2f}', 'TEXT')
             out = LocalGlyphCorruptor.corrupt_actual_frame_text(out, rng, intensity=text_v * master_v)
 
         # 3. The Complex "Green Light" Subtle Shift
@@ -320,6 +362,9 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.preview_thread = None
 
         self.setup_ui()
+
+        _launch_debug_terminal()
+        dbg(f'App started. seed={self.engine.seed:08X}', 'INIT')
 
         if not FFMPEG:
             self.after(800, self.prompt_ffmpeg_install)
@@ -605,11 +650,25 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.export_btn.configure(state="disabled")
         self.progress_bar.set(0)
         self.progress_bar.pack(side="bottom", fill="x")
-        threading.Thread(target=self.export_video_thread, daemon=True).start()
 
-    def export_video_thread(self):
+        # CRITICAL FIX: Snapshot ALL state on the main thread NOW.
+        # Calling get_sliders() or reading engine state inside a background
+        # thread on Windows reads tkinter widgets unsafely and silently returns
+        # wrong/default values — causing export to have zero effects.
+        _snap_sliders = self.get_sliders()
+        _snap_ai      = self.engine.use_local_ai
+        _snap_seed    = self.engine.seed
+        _snap_path    = self.current_media_path
+        dbg(f'Export start — seed={_snap_seed:08X} ai={_snap_ai} sliders={_snap_sliders}', 'EXPORT')
+
+        threading.Thread(
+            target=self.export_video_thread,
+            args=(_snap_sliders, _snap_ai, _snap_seed, _snap_path),
+            daemon=True
+        ).start()
+
+    def export_video_thread(self, sliders, use_local_ai, seed, in_path):
         try:
-            in_path = self.current_media_path
             out_dir = os.path.dirname(in_path)
             base = os.path.splitext(os.path.basename(in_path))[0]
             final_path = os.path.join(out_dir, f"ꓫ REMΕMᗷER_{base}_MISREMEMBERED.mp4")
@@ -630,11 +689,12 @@ class MisrememberedDesktopApp(ctk.CTk):
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(temp_video, fourcc, fps, (target_w, target_h))
 
-            sliders = self.get_sliders()
             frame_idx = 0
             start_t = time.time()
 
             self.add_log(f"Turbo Export: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
+            dbg(f"Export confirmed: ai={use_local_ai} seed={seed:08X} sliders={sliders}", "EXPORT")
+            dbg(f"  {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f}fps total={total_frames}", "EXPORT")
 
             while cap.isOpened():
                 ret, frame = cap.read()
@@ -645,8 +705,11 @@ class MisrememberedDesktopApp(ctk.CTk):
                     frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
                 # Identical deterministic temporal seed ensures 100% parity with preview!
-                frame_rng = random.Random(self.engine.seed + int(frame_idx / (fps * 2.0)))
+                frame_rng = random.Random(seed + int(frame_idx / (fps * 2.0)))
+                _orig_ai = self.engine.use_local_ai
+                self.engine.use_local_ai = use_local_ai
                 out = self.engine.process_frame(frame, frame_rng, sliders, frame_idx, fps)
+                self.engine.use_local_ai = _orig_ai
                 writer.write(out)
                 frame_idx += 1
 
