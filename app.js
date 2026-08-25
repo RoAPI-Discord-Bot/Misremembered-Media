@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.5.1';
+const APP_VERSION = 'v2.5.2';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1250,12 +1250,27 @@ document.addEventListener('DOMContentLoaded', () => {
     let detectedWordEntities = [];
     let isAiOcrRunning = false;
 
+    let _analysisCanvas = null;
+    let _analysisCtx = null;
+    const ANALYSIS_W = 320;
+    const ANALYSIS_H = 180;
+
+    function getAnalysisCtx() {
+        if (!_analysisCanvas) {
+            _analysisCanvas = document.createElement('canvas');
+            _analysisCanvas.width = ANALYSIS_W;
+            _analysisCanvas.height = ANALYSIS_H;
+            _analysisCtx = _analysisCanvas.getContext('2d', { willReadFrequently: true });
+        }
+        return _analysisCtx;
+    }
+
     // Extracts ONLY the foreground glyphs/letters with a 100% transparent background
     function extractPureGlyphCanvas(rx, ry, rw, rh) {
         const sCanvas = document.createElement('canvas');
         sCanvas.width = rw;
         sCanvas.height = rh;
-        const sCtx = sCanvas.getContext('2d');
+        const sCtx = sCanvas.getContext('2d', { willReadFrequently: true });
         if (rw <= 0 || rh <= 0) return sCanvas;
 
         try {
@@ -1263,16 +1278,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const imgData = sCtx.getImageData(0, 0, rw, rh);
             const d = imgData.data;
 
-            // 1. Sample perimeter border pixels to estimate background color & luminance
+            // 1. Fast sample perimeter border pixels to estimate background color & luminance
             let bgR = 0, bgG = 0, bgB = 0, sampleCount = 0;
-            for (let x = 0; x < rw; x++) {
+            for (let x = 0; x < rw; x += 2) {
                 let idx = x * 4;
                 bgR += d[idx]; bgG += d[idx + 1]; bgB += d[idx + 2];
                 idx = ((rh - 1) * rw + x) * 4;
                 bgR += d[idx]; bgG += d[idx + 1]; bgB += d[idx + 2];
                 sampleCount += 2;
             }
-            for (let y = 1; y < rh - 1; y++) {
+            for (let y = 1; y < rh - 1; y += 2) {
                 let idx = (y * rw) * 4;
                 bgR += d[idx]; bgG += d[idx + 1]; bgB += d[idx + 2];
                 idx = (y * rw + (rw - 1)) * 4;
@@ -1286,23 +1301,19 @@ document.addEventListener('DOMContentLoaded', () => {
             const bgLum = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
 
             // 2. Threshold each pixel: foreground glyphs vs background
-            for (let y = 0; y < rh; y++) {
-                for (let x = 0; x < rw; x++) {
-                    const idx = (y * rw + x) * 4;
-                    const r = d[idx], g = d[idx + 1], b = d[idx + 2];
-                    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            for (let i = 0; i < d.length; i += 4) {
+                const r = d[i], g = d[i + 1], b = d[i + 2];
+                const lum = 0.299 * r + 0.587 * g + 0.114 * b;
 
-                    const colorDist = Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
-                    const lumDiff = Math.abs(lum - bgLum);
+                const colorDist = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+                const lumDiff = Math.abs(lum - bgLum);
 
-                    const threshold = 14;
-                    if (colorDist < threshold && lumDiff < threshold) {
-                        d[idx + 3] = 0; // 100% transparent background (eliminates wallpaper boxes!)
-                    } else {
-                        // Keep text stroke visible with smooth edge feathering
-                        const factor = Math.min(1.0, Math.max(0.0, (Math.max(colorDist, lumDiff) - threshold) / 10));
-                        d[idx + 3] = Math.round(255 * factor);
-                    }
+                const threshold = 18;
+                if (colorDist < threshold * 1.8 && lumDiff < threshold) {
+                    d[i + 3] = 0; // 100% transparent background
+                } else {
+                    const factor = Math.min(1.0, Math.max(0.0, (Math.max(colorDist / 2, lumDiff) - threshold) / 8));
+                    d[i + 3] = Math.round(255 * factor);
                 }
             }
 
@@ -1314,105 +1325,116 @@ document.addEventListener('DOMContentLoaded', () => {
         return sCanvas;
     }
 
-    // High-speed Connected Component & Word Line Segmenter + AI OCR integration
+    // Ultra High-speed Downsampled Text & Glyph Line Segmenter (< 0.2ms execution)
     function scanForWordsAndGlyphs(w, h) {
+        if (w <= 0 || h <= 0) return;
         const prevEntities = detectedWordEntities;
         const newEntities = [];
         textCandidateBlocks = [];
 
         try {
-            const imgData = ctx.getImageData(0, 0, w, h);
+            const aCtx = getAnalysisCtx();
+            aCtx.drawImage(glitchCanvas, 0, 0, ANALYSIS_W, ANALYSIS_H);
+            const imgData = aCtx.getImageData(0, 0, ANALYSIS_W, ANALYSIS_H);
             const data = imgData.data;
             const lum = (idx) => 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
 
-            // 1. Line density histogram to find horizontal text lines
-            const rowDiffs = new Float32Array(h);
+            const scaleX = w / ANALYSIS_W;
+            const scaleY = h / ANALYSIS_H;
+
+            // 1. Row difference histogram to find horizontal text lines on 320x180 buffer
+            const rowDiffs = new Float32Array(ANALYSIS_H);
             let totalDiff = 0;
-            for (let y = 0; y < h; y++) {
+            for (let y = 0; y < ANALYSIS_H; y++) {
                 let diffSum = 0;
-                for (let x = 8; x < w - 8; x += 4) {
-                    const idx1 = (y * w + x) * 4;
-                    const idx2 = (y * w + (x + 3)) * 4;
+                for (let x = 2; x < ANALYSIS_W - 2; x += 2) {
+                    const idx1 = (y * ANALYSIS_W + x) * 4;
+                    const idx2 = (y * ANALYSIS_W + (x + 2)) * 4;
                     diffSum += Math.abs(lum(idx1) - lum(idx2));
                 }
-                rowDiffs[y] = diffSum / (w / 4);
+                rowDiffs[y] = diffSum / (ANALYSIS_W / 2);
                 totalDiff += rowDiffs[y];
             }
 
-            const avgDiff = totalDiff / Math.max(1, h);
-            const rowThreshold = Math.max(3.8, avgDiff * 1.12);
+            const avgDiff = totalDiff / Math.max(1, ANALYSIS_H);
+            const rowThreshold = Math.max(3.2, avgDiff * 1.08);
 
             // Identify active text bands
             const textBands = [];
             let inBand = false;
             let startY = 0;
-            for (let y = 0; y < h; y++) {
+            for (let y = 0; y < ANALYSIS_H; y++) {
                 if (rowDiffs[y] > rowThreshold) {
                     if (!inBand) { inBand = true; startY = y; }
                 } else {
                     if (inBand) {
                         inBand = false;
-                        if (y - startY >= 8 && y - startY <= 110) {
-                            textBands.push({ startY: Math.max(0, startY - 4), endY: Math.min(h, y + 4) });
+                        if (y - startY >= 2 && y - startY <= 30) {
+                            textBands.push({ startY: Math.max(0, startY - 1), endY: Math.min(ANALYSIS_H, y + 1) });
                         }
                     }
                 }
             }
-            if (inBand && h - startY >= 8) {
-                textBands.push({ startY: Math.max(0, startY - 4), endY: h });
+            if (inBand && ANALYSIS_H - startY >= 2) {
+                textBands.push({ startY: Math.max(0, startY - 1), endY: ANALYSIS_H });
             }
 
             // 2. Segment each band horizontally into discrete words
             for (const band of textBands) {
                 const bh = band.endY - band.startY;
-                const colDiffs = new Float32Array(w);
-                for (let x = 0; x < w; x++) {
+                const colDiffs = new Float32Array(ANALYSIS_W);
+                for (let x = 0; x < ANALYSIS_W; x++) {
                     let colSum = 0;
-                    for (let y = band.startY; y < band.endY; y += 2) {
-                        const idx = (y * w + x) * 4;
+                    for (let y = band.startY; y < band.endY; y++) {
+                        const idx = (y * ANALYSIS_W + x) * 4;
                         colSum += lum(idx);
                     }
-                    colDiffs[x] = colSum / (bh / 2);
+                    colDiffs[x] = colSum / bh;
                 }
 
                 let avgBandLum = 0;
-                for (let x = 0; x < w; x++) avgBandLum += colDiffs[x];
-                avgBandLum /= Math.max(1, w);
+                for (let x = 0; x < ANALYSIS_W; x++) avgBandLum += colDiffs[x];
+                avgBandLum /= ANALYSIS_W;
 
                 let inWord = false;
                 let startX = 0;
                 let spaceGap = 0;
 
-                for (let x = 4; x < w - 4; x++) {
-                    const isCharCol = Math.abs(colDiffs[x] - avgBandLum) > 7;
+                for (let x = 2; x < ANALYSIS_W - 2; x++) {
+                    const isCharCol = Math.abs(colDiffs[x] - avgBandLum) > 6;
                     if (isCharCol) {
                         spaceGap = 0;
                         if (!inWord) { inWord = true; startX = x; }
                     } else {
                         if (inWord) {
                             spaceGap++;
-                            if (spaceGap > 8 || x === w - 5) {
+                            if (spaceGap > 2 || x === ANALYSIS_W - 3) {
                                 inWord = false;
                                 const endX = x - spaceGap;
                                 const ww = endX - startX;
-                                if (ww >= 10 && ww <= 550) {
+                                if (ww >= 3 && ww <= 140) {
+                                    const fullX = Math.round(startX * scaleX);
+                                    const fullY = Math.round(band.startY * scaleY);
+                                    const fullW = Math.round(ww * scaleX);
+                                    const fullH = Math.round(bh * scaleY);
+
                                     // Check if this word already existed in previous scan to preserve mutation state
                                     const existing = prevEntities.find(pe => 
-                                        Math.abs(pe.x - startX) < 25 && Math.abs(pe.y - band.startY) < 18
+                                        Math.abs(pe.x - fullX) < 30 && Math.abs(pe.y - fullY) < 22
                                     );
 
                                     const wordObj = {
                                         id: existing ? existing.id : 'word_' + Math.random().toString(36).substr(2, 6),
-                                        x: startX,
-                                        y: band.startY,
-                                        w: ww,
-                                        h: bh,
-                                        glyphCanvas: extractPureGlyphCanvas(startX, band.startY, ww, bh),
+                                        x: fullX,
+                                        y: fullY,
+                                        w: fullW,
+                                        h: fullH,
+                                        glyphCanvas: existing && existing.glyphCanvas ? existing.glyphCanvas : null,
                                         originalText: existing ? existing.originalText : '',
                                         mutation: existing ? existing.mutation : null
                                     };
                                     newEntities.push(wordObj);
-                                    textCandidateBlocks.push({ x: startX, y: band.startY, w: ww, h: bh, contrast: 40 });
+                                    textCandidateBlocks.push({ x: fullX, y: fullY, w: fullW, h: fullH, contrast: 40 });
                                 }
                             }
                         }
@@ -1422,16 +1444,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
             detectedWordEntities = newEntities;
 
-            // Automatically mutate 1-3 newly detected words so distortion is visible immediately
+            // Automatically mutate words
             if (toggleMisrememberedText && toggleMisrememberedText.checked && detectedWordEntities.length > 0) {
                 const unmutated = detectedWordEntities.filter(wrd => !wrd.mutation);
-                const numToMutate = Math.min(unmutated.length, Math.max(1, Math.floor(detectedWordEntities.length * 0.45)));
+                const numToMutate = Math.min(unmutated.length, Math.max(1, Math.floor(detectedWordEntities.length * 0.50)));
                 for (let i = 0; i < numToMutate; i++) {
                     mutateWordEntity(unmutated[i], w, h);
                 }
             }
 
-            console.log(`[GLYPH SEGMENTER] Detected ${detectedWordEntities.length} discrete word entities`);
+            // Ensure all mutated entities have their glyphCanvas extracted (lazy extraction for mutated words only!)
+            for (const word of detectedWordEntities) {
+                if (word.mutation && !word.glyphCanvas) {
+                    word.glyphCanvas = extractPureGlyphCanvas(word.x, word.y, word.w, word.h);
+                }
+            }
         } catch (e) {
             console.error('[WORD SCAN ERROR]', e);
         }
@@ -2179,7 +2206,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Kane Pixels 'Forgets' Engine) ---
         if (toggleMisrememberedText && toggleMisrememberedText.checked) {
-            if (now - lastTextScanTime > 500 || detectedWordEntities.length === 0) {
+            if (now - lastTextScanTime > 150 || detectedWordEntities.length === 0) {
                 lastTextScanTime = now;
                 scanForWordsAndGlyphs(w, h);
             }
