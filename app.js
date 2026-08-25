@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.6.0';
+const APP_VERSION = 'v2.6.1';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1693,64 +1693,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Authentic VHS Rainbow Static & Chroma Tear Glitch (matching Kane Pixels / tape tracking noise)
-    function renderRainbowStaticGlitch(w, h, intensity, now) {
-        if (intensity <= 0.02) return;
 
-        ctx.save();
-
-        // 1. Horizontal RGB / Rainbow Scanline Chroma Bands
-        const numBands = Math.floor(18 + intensity * 50);
-        const rainbowColors = [
-            'rgba(0, 240, 255, ',   // Cyan
-            'rgba(255, 0, 140, ',   // Magenta
-            'rgba(0, 255, 68, ',    // Acid Green
-            'rgba(255, 235, 0, ',   // Neon Yellow
-            'rgba(255, 70, 0, ',    // Hot Orange
-            'rgba(160, 0, 255, ',   // Electric Violet
-            'rgba(0, 180, 255, '    // Deep Sky Blue
-        ];
-
-        // Global composite blend: screen for authentic luminous CRT phosphor glow
-        ctx.globalCompositeOperation = 'screen';
-
-        for (let b = 0; b < numBands; b++) {
-            const bandY = Math.floor(frameRng() * h);
-            const bandH = Math.max(1, Math.floor(1 + frameRng() * 4));
-            const bandW = Math.floor(w * (0.35 + frameRng() * 0.65));
-            const bandX = Math.floor(frameRng() * (w - bandW));
-
-            const colorPrefix = rainbowColors[Math.floor(frameRng() * rainbowColors.length)];
-            const alpha = (0.28 + frameRng() * 0.55) * Math.min(1.0, intensity * 1.4);
-            ctx.fillStyle = colorPrefix + alpha.toFixed(3) + ')';
-            ctx.fillRect(bandX, bandY, bandW, bandH);
-
-            // Subtle bright core highlight in center of thicker bands
-            if (bandH >= 3 && frameRng() < 0.45) {
-                ctx.fillStyle = `rgba(255, 255, 255, ${(alpha * 0.85).toFixed(3)})`;
-                ctx.fillRect(bandX + 8, bandY + 1, Math.max(8, bandW - 16), 1);
-            }
-        }
-
-        // 2. Horizontal Sync Tearing / Scanline Jitter Slices
-        const numSlices = Math.floor(2 + intensity * 8);
-        for (let s = 0; s < numSlices; s++) {
-            const sliceY = Math.floor(frameRng() * (h - 20));
-            const sliceH = Math.floor(2 + frameRng() * 10);
-            const shiftX = Math.round((frameRng() - 0.5) * (18 + intensity * 38));
-
-            ctx.globalCompositeOperation = 'source-over';
-            ctx.save();
-            ctx.drawImage(
-                glitchCanvas,
-                0, sliceY, w, sliceH,
-                shiftX, sliceY, w, sliceH
-            );
-            ctx.restore();
-        }
-
-        ctx.restore();
-    }
 
     // --- VISUAL INTERRUPT EVENTS ---
     let vhsTrackingJitterUntil = 0;
@@ -2399,13 +2342,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderMisrememberedText(ctx, w, h, uncannyIntensity);
         }
 
-        // --- VHS RAINBOW STATIC & CHROMA TEAR GLITCH (Kane Pixels Tape Tracking Noise) ---
-        // Flares up during warping surges, periodic tracking drops, or degradation collapse
-        const rainbowGlitchTrigger = isWarpingActive || (isDegrading && degradationProg > 0.60) || (Math.sin(now * 0.0035) > 0.84);
-        if (rainbowGlitchTrigger && uncannyIntensity > 0.10) {
-            const staticIntensity = isWarpingActive ? (0.35 + 0.65 * uncannyIntensity) : (0.28 * uncannyIntensity);
-            renderRainbowStaticGlitch(w, h, staticIntensity, now);
-        }
+
 
         // FINAL DEGRADATION BREAKDOWN: In the last 15% of playback, apply extreme visual+audio destruction
         if (isDegrading && degradationProg > 0.85) {
