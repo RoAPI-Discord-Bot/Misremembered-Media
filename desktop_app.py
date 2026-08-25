@@ -638,21 +638,21 @@ class LocalGlyphCorruptor:
 
             # Ghost offset duplicate (subtle — 3-6% shift)
             if rng.random() < 0.75:
-                shift_x = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bw * 0.03)))
-                shift_y = rng.choice([-1, 1]) * rng.randint(1, max(2, int(bh * 0.08)))
+                shift_x = rng.choice([-1, 1]) * rng.randint(1, max(2, int(ew * 0.03)))
+                shift_y = rng.choice([-1, 1]) * rng.randint(1, max(2, int(eh * 0.08)))
                 M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-                ghost = cv2.warpAffine(patch, M, (bw, bh), borderMode=cv2.BORDER_REFLECT)
+                ghost = cv2.warpAffine(patch, M, (ew, eh), borderMode=cv2.BORDER_REFLECT)
                 patch = cv2.addWeighted(patch, 0.65, ghost, 0.35, 0)
 
             # Vertical strip micro-shift (razor serration)
             if intensity > 0.30:
-                strip_w = max(2, int(bh * 0.16))
-                for sx_pos in range(0, bw, strip_w * 2):
-                    ex_pos = min(bw, sx_pos + strip_w)
-                    shift = rng.choice([-1, 1]) * rng.randint(0, max(1, int(bh * 0.08)))
+                strip_w = max(2, int(eh * 0.16))
+                for sx_pos in range(0, ew, strip_w * 2):
+                    ex_pos = min(ew, sx_pos + strip_w)
+                    shift = rng.choice([-1, 1]) * rng.randint(0, max(1, int(eh * 0.08)))
                     Mp = np.float32([[1, 0, 0], [0, 1, shift]])
                     patch[:, sx_pos:ex_pos] = cv2.warpAffine(
-                        patch[:, sx_pos:ex_pos], Mp, (ex_pos - sx_pos, bh),
+                        patch[:, sx_pos:ex_pos], Mp, (ex_pos - sx_pos, eh),
                         borderMode=cv2.BORDER_REFLECT
                     )
 
