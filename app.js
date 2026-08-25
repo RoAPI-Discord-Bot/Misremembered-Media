@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.5.5';
+const APP_VERSION = 'v2.6.0';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1524,9 +1524,53 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    let _faceFeatherCanvas = null;
+    let _faceFeatherCtx = null;
+
+    function getFaceFeatherCtx(w, h) {
+        if (!_faceFeatherCanvas) {
+            _faceFeatherCanvas = document.createElement('canvas');
+        }
+        if (_faceFeatherCanvas.width !== w || _faceFeatherCanvas.height !== h) {
+            _faceFeatherCanvas.width = w;
+            _faceFeatherCanvas.height = h;
+            _faceFeatherCtx = _faceFeatherCanvas.getContext('2d');
+        }
+        return _faceFeatherCtx;
+    }
+
+    // Draws a soft-feathered slice with zero hard box seams
+    function drawFeatheredSlice(targetCtx, srcCanvas, sx, sy, sw, sh, dx, dy, opacity) {
+        if (sw <= 0 || sh <= 0 || opacity <= 0) return;
+        const fCtx = getFaceFeatherCtx(sw, sh);
+        fCtx.clearRect(0, 0, sw, sh);
+
+        // 1. Copy slice
+        fCtx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+
+        // 2. Feather perimeter edges with radial gradient mask
+        fCtx.globalCompositeOperation = 'destination-in';
+        const grad = fCtx.createRadialGradient(
+            sw / 2, sh / 2, Math.min(sw, sh) * 0.18,
+            sw / 2, sh / 2, Math.min(sw, sh) * 0.48
+        );
+        grad.addColorStop(0, 'rgba(0,0,0,1)');
+        grad.addColorStop(0.65, 'rgba(0,0,0,0.85)');
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        fCtx.fillStyle = grad;
+        fCtx.fillRect(0, 0, sw, sh);
+        fCtx.globalCompositeOperation = 'source-over';
+
+        // 3. Draw smoothly onto main canvas
+        targetCtx.save();
+        targetCtx.globalAlpha = opacity;
+        targetCtx.drawImage(_faceFeatherCanvas, 0, 0, sw, sh, dx, dy, sw, sh);
+        targetCtx.restore();
+    }
+
     // Renders all persistent word mutations at fixed, rock-solid coordinates (Zero Flickering!)
-    function renderMisrememberedText(ctx, canvasW, canvasH) {
-        if (!detectedWordEntities.length) return;
+    function renderMisrememberedText(ctx, canvasW, canvasH, intensity = 1.0) {
+        if (!detectedWordEntities.length || intensity <= 0.05) return;
 
         // Ensure at least 50% of words have active mutations
         const mutated = detectedWordEntities.filter(w => w.mutation && w.glyphCanvas);
@@ -1555,7 +1599,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const m = word.mutation;
             if (m.type === 'floating_echo') {
                 ctx.save();
-                ctx.globalAlpha = 0.95;
+                ctx.globalAlpha = 0.95 * intensity;
                 ctx.translate(m.destX + word.w / 2, m.destY + word.h / 2);
                 ctx.scale(-1, -1);
                 ctx.drawImage(word.glyphCanvas, -word.w / 2, -word.h / 2);
@@ -1565,7 +1609,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const destX = word.x + m.stepDx * s;
                     const destY = word.y + m.stepDy * s;
                     if (destX + word.w > canvasW || destY + word.h > canvasH) continue;
-                    const alpha = Math.max(0.35, 0.95 - s * 0.18);
+                    const alpha = Math.max(0.30, (0.95 - s * 0.18) * intensity);
                     ctx.save();
                     ctx.globalAlpha = alpha;
                     const trimX = Math.min(word.w * 0.6, (s - 1) * (word.w / m.numSteps) * 0.6);
@@ -1578,7 +1622,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else if (m.type === 'glyph_flip') {
                 ctx.save();
-                ctx.globalAlpha = 0.95;
+                ctx.globalAlpha = 0.95 * intensity;
                 ctx.translate(word.x + m.charOffset + m.charW, word.y);
                 ctx.scale(-1, 1);
                 ctx.drawImage(word.glyphCanvas, m.charOffset, 0, m.charW, word.h, 0, 0, m.charW, word.h);
@@ -1588,9 +1632,9 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.restore();
     }
 
-    // Kane Pixels authentic facial & subject misremembering (Angled Duplication & Feature Drift)
-    function applyFaceAndSubjectDistortion(w, h, now) {
-        if (!toggleObjectMelt || !toggleObjectMelt.checked) return;
+    // Kane Pixels authentic facial & subject misremembering (Angled Duplication & Soft Feathering)
+    function applyFaceAndSubjectDistortion(w, h, intensity = 1.0) {
+        if (!toggleObjectMelt || !toggleObjectMelt.checked || intensity <= 0.05) return;
 
         try {
             // Target center-weighted face/subject area
@@ -1599,60 +1643,113 @@ document.addEventListener('DOMContentLoaded', () => {
             const faceW = Math.round(w * 0.44);
             const faceH = Math.round(h * 0.58);
 
-            // 1. Asymmetrical Upper Feature / Eye Drift (shift upper face up and slightly offset)
-            const eyeH = Math.round(faceH * 0.40);
-            ctx.save();
-            ctx.globalAlpha = 0.70;
-            const eyeShiftY = -Math.round(h * 0.035);
-            const eyeShiftX = Math.round(w * 0.015);
-            ctx.drawImage(
-                glitchCanvas,
+            // 1. Asymmetrical Upper Feature / Eye Drift
+            const eyeH = Math.round(faceH * 0.42);
+            const eyeShiftY = -Math.round(h * 0.035 * intensity);
+            const eyeShiftX = Math.round(w * 0.015 * intensity);
+            drawFeatheredSlice(
+                ctx, glitchCanvas,
                 faceX, faceY, faceW, eyeH,
-                faceX + eyeShiftX, faceY + eyeShiftY, faceW, eyeH
+                faceX + eyeShiftX, faceY + eyeShiftY,
+                0.72 * intensity
             );
-            ctx.restore();
 
             // 2. Angled Lower Feature Duplicate (Nose / Mouth displaced downwards at an angle)
             const noseY = faceY + Math.round(faceH * 0.35);
-            const noseH = Math.round(faceH * 0.45);
-            const noseAngleDx = Math.round(w * 0.038);
-            const noseAngleDy = Math.round(h * 0.048);
+            const noseH = Math.round(faceH * 0.48);
+            const noseAngleDx = Math.round(w * 0.038 * intensity);
+            const noseAngleDy = Math.round(h * 0.048 * intensity);
 
-            // First overlapping duplicate
-            ctx.save();
-            ctx.globalAlpha = 0.78;
-            ctx.drawImage(
-                glitchCanvas,
+            // Primary angled duplicate
+            drawFeatheredSlice(
+                ctx, glitchCanvas,
                 faceX, noseY, faceW, noseH,
-                faceX + noseAngleDx, noseY + noseAngleDy, faceW, noseH
+                faceX + noseAngleDx, noseY + noseAngleDy,
+                0.78 * intensity
             );
-            ctx.restore();
 
-            // Second subtle trailing duplicate at further angle
-            ctx.save();
-            ctx.globalAlpha = 0.42;
-            ctx.drawImage(
-                glitchCanvas,
-                faceX, noseY, faceW, noseH,
-                faceX + noseAngleDx * 1.8, noseY + noseAngleDy * 1.8, faceW, noseH
-            );
-            ctx.restore();
+            // Secondary trailing ghost duplicate (at higher intensity)
+            if (intensity > 0.45) {
+                drawFeatheredSlice(
+                    ctx, glitchCanvas,
+                    faceX, noseY, faceW, noseH,
+                    faceX + Math.round(noseAngleDx * 1.7), noseY + Math.round(noseAngleDy * 1.7),
+                    0.42 * intensity
+                );
+            }
 
             // 3. Left half face ghost displacement
-            const halfW = Math.round(faceW * 0.50);
-            ctx.save();
-            ctx.globalAlpha = 0.55;
-            const halfDx = -Math.round(w * 0.025);
-            const halfDy = -Math.round(h * 0.030);
-            ctx.drawImage(
-                glitchCanvas,
+            const halfW = Math.round(faceW * 0.52);
+            const halfDx = -Math.round(w * 0.025 * intensity);
+            const halfDy = -Math.round(h * 0.028 * intensity);
+            drawFeatheredSlice(
+                ctx, glitchCanvas,
                 faceX, faceY, halfW, faceH,
-                faceX + halfDx, faceY + halfDy, halfW, faceH
+                faceX + halfDx, faceY + halfDy,
+                0.55 * intensity
             );
-            ctx.restore();
         } catch (e) {
             console.warn('[FACE DISTORTION ERROR]', e);
         }
+    }
+
+    // Authentic VHS Rainbow Static & Chroma Tear Glitch (matching Kane Pixels / tape tracking noise)
+    function renderRainbowStaticGlitch(w, h, intensity, now) {
+        if (intensity <= 0.02) return;
+
+        ctx.save();
+
+        // 1. Horizontal RGB / Rainbow Scanline Chroma Bands
+        const numBands = Math.floor(18 + intensity * 50);
+        const rainbowColors = [
+            'rgba(0, 240, 255, ',   // Cyan
+            'rgba(255, 0, 140, ',   // Magenta
+            'rgba(0, 255, 68, ',    // Acid Green
+            'rgba(255, 235, 0, ',   // Neon Yellow
+            'rgba(255, 70, 0, ',    // Hot Orange
+            'rgba(160, 0, 255, ',   // Electric Violet
+            'rgba(0, 180, 255, '    // Deep Sky Blue
+        ];
+
+        // Global composite blend: screen for authentic luminous CRT phosphor glow
+        ctx.globalCompositeOperation = 'screen';
+
+        for (let b = 0; b < numBands; b++) {
+            const bandY = Math.floor(frameRng() * h);
+            const bandH = Math.max(1, Math.floor(1 + frameRng() * 4));
+            const bandW = Math.floor(w * (0.35 + frameRng() * 0.65));
+            const bandX = Math.floor(frameRng() * (w - bandW));
+
+            const colorPrefix = rainbowColors[Math.floor(frameRng() * rainbowColors.length)];
+            const alpha = (0.28 + frameRng() * 0.55) * Math.min(1.0, intensity * 1.4);
+            ctx.fillStyle = colorPrefix + alpha.toFixed(3) + ')';
+            ctx.fillRect(bandX, bandY, bandW, bandH);
+
+            // Subtle bright core highlight in center of thicker bands
+            if (bandH >= 3 && frameRng() < 0.45) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${(alpha * 0.85).toFixed(3)})`;
+                ctx.fillRect(bandX + 8, bandY + 1, Math.max(8, bandW - 16), 1);
+            }
+        }
+
+        // 2. Horizontal Sync Tearing / Scanline Jitter Slices
+        const numSlices = Math.floor(2 + intensity * 8);
+        for (let s = 0; s < numSlices; s++) {
+            const sliceY = Math.floor(frameRng() * (h - 20));
+            const sliceH = Math.floor(2 + frameRng() * 10);
+            const shiftX = Math.round((frameRng() - 0.5) * (18 + intensity * 38));
+
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.save();
+            ctx.drawImage(
+                glitchCanvas,
+                0, sliceY, w, sliceH,
+                shiftX, sliceY, w, sliceH
+            );
+            ctx.restore();
+        }
+
+        ctx.restore();
     }
 
     // --- VISUAL INTERRUPT EVENTS ---
@@ -2253,6 +2350,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const isDegrading = toggleMemoryDegrading && toggleMemoryDegrading.checked;
 
+        // Dynamic Uncanny Intensity: breathes in & out, compounds over time if memory degrading is on
+        let uncannyIntensity = 0.5;
+        if (isDegrading) {
+            if (degradationProg < 0.12) {
+                uncannyIntensity = 0.0; // Clean start
+            } else {
+                const degFactor = (degradationProg - 0.12) / 0.88; // 0.0 to 1.0
+                const wave = 0.60 + 0.40 * Math.sin(now * 0.0018);
+                const surge = isWarpingActive ? 1.35 : wave;
+                uncannyIntensity = Math.min(1.0, degFactor * surge);
+            }
+        } else {
+            // Natural uncanny wave breathing (swells in and out smoothly)
+            const wave = 0.45 + 0.55 * Math.sin(now * 0.0016);
+            const surge = isWarpingActive ? 1.0 : (wave * 0.75);
+            uncannyIntensity = masterVal * surge;
+        }
+
         // --- UNCANNY ANOMALY PROCESSING (WARPING OR MEMORY DEGRADATION) ---
         if (isWarpingActive || isDegrading) {
             if (flawedMirrorVal > 0 && frameRng() < 0.04) {
@@ -2270,18 +2385,26 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // --- KANE PIXELS FACE & SUBJECT MISREMEMBERING (Angled Feature Duplication) ---
-        if (toggleObjectMelt && toggleObjectMelt.checked) {
-            applyFaceAndSubjectDistortion(w, h, now);
+        // --- KANE PIXELS FACE & SUBJECT MISREMEMBERING (Angled Feature Duplication with Feathering) ---
+        if (toggleObjectMelt && toggleObjectMelt.checked && uncannyIntensity > 0.04) {
+            applyFaceAndSubjectDistortion(w, h, uncannyIntensity);
         }
 
         // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Kane Pixels 'Forgets' Engine) ---
-        if (toggleMisrememberedText && toggleMisrememberedText.checked) {
+        if (toggleMisrememberedText && toggleMisrememberedText.checked && uncannyIntensity > 0.04) {
             if (now - lastTextScanTime > 150 || detectedWordEntities.length === 0) {
                 lastTextScanTime = now;
                 scanForWordsAndGlyphs(w, h);
             }
-            renderMisrememberedText(ctx, w, h);
+            renderMisrememberedText(ctx, w, h, uncannyIntensity);
+        }
+
+        // --- VHS RAINBOW STATIC & CHROMA TEAR GLITCH (Kane Pixels Tape Tracking Noise) ---
+        // Flares up during warping surges, periodic tracking drops, or degradation collapse
+        const rainbowGlitchTrigger = isWarpingActive || (isDegrading && degradationProg > 0.60) || (Math.sin(now * 0.0035) > 0.84);
+        if (rainbowGlitchTrigger && uncannyIntensity > 0.10) {
+            const staticIntensity = isWarpingActive ? (0.35 + 0.65 * uncannyIntensity) : (0.28 * uncannyIntensity);
+            renderRainbowStaticGlitch(w, h, staticIntensity, now);
         }
 
         // FINAL DEGRADATION BREAKDOWN: In the last 15% of playback, apply extreme visual+audio destruction
