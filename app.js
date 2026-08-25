@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.6.3';
+const APP_VERSION = 'v2.6.4';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1539,105 +1539,49 @@ document.addEventListener('DOMContentLoaded', () => {
         return _faceFeatherCtx;
     }
 
-    // Draws a solid, real duplicated feature with rectilinear linear edge blending (ZERO CIRCLES, 0% ghosting, 100% solid real copy)
-    function drawFeatheredSlice(targetCtx, srcCanvas, sx, sy, sw, sh, dx, dy, opacity = 1.0) {
-        if (sw <= 0 || sh <= 0 || opacity <= 0) return;
-        const fCtx = getFaceFeatherCtx(sw, sh);
-        fCtx.clearRect(0, 0, sw, sh);
-
-        // 1. Copy source slice directly
-        fCtx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
-
-        // 2. Linear edge softening on 4 borders (NOT a circle!)
-        fCtx.globalCompositeOperation = 'destination-in';
-        fCtx.fillStyle = '#000000';
-        fCtx.fillRect(0, 0, sw, sh);
-
-        const featherPx = Math.max(2, Math.min(8, Math.floor(Math.min(sw, sh) * 0.06)));
-        if (featherPx > 1) {
-            // Top linear fade
-            const topGrad = fCtx.createLinearGradient(0, 0, 0, featherPx);
-            topGrad.addColorStop(0, 'rgba(0,0,0,0)');
-            topGrad.addColorStop(1, 'rgba(0,0,0,1)');
-            fCtx.fillStyle = topGrad;
-            fCtx.fillRect(0, 0, sw, featherPx);
-
-            // Bottom linear fade
-            const botGrad = fCtx.createLinearGradient(0, sh - featherPx, 0, sh);
-            botGrad.addColorStop(0, 'rgba(0,0,0,1)');
-            botGrad.addColorStop(1, 'rgba(0,0,0,0)');
-            fCtx.fillStyle = botGrad;
-            fCtx.fillRect(0, sh - featherPx, sw, featherPx);
-
-            // Left linear fade
-            const leftGrad = fCtx.createLinearGradient(0, 0, featherPx, 0);
-            leftGrad.addColorStop(0, 'rgba(0,0,0,0)');
-            leftGrad.addColorStop(1, 'rgba(0,0,0,1)');
-            fCtx.fillStyle = leftGrad;
-            fCtx.fillRect(0, 0, featherPx, sh);
-
-            // Right linear fade
-            const rightGrad = fCtx.createLinearGradient(sw - featherPx, 0, sw, 0);
-            rightGrad.addColorStop(0, 'rgba(0,0,0,1)');
-            rightGrad.addColorStop(1, 'rgba(0,0,0,0)');
-            fCtx.fillStyle = rightGrad;
-            fCtx.fillRect(sw - featherPx, 0, featherPx, sh);
-        }
-
-        fCtx.globalCompositeOperation = 'source-over';
-
-        // 3. Draw onto target canvas with 100% solid opacity
-        targetCtx.save();
-        targetCtx.globalAlpha = Math.min(1.0, opacity);
-        targetCtx.drawImage(_faceFeatherCanvas, 0, 0, sw, sh, dx, dy, sw, sh);
-        targetCtx.restore();
-    }
-
-    // Kane Pixels authentic solid facial & subject duplication (real physical copies, zero circular artifacts)
+    // Kane Pixels authentic solid facial & subject duplication (real physical copy, zero circles, zero ghosting)
     function applyFaceAndSubjectDistortion(w, h, intensity = 1.0) {
         if (!toggleObjectMelt || !toggleObjectMelt.checked || intensity <= 0.05) return;
 
         try {
-            // Target center-weighted face/subject area
-            const faceX = Math.round(w * 0.28);
-            const faceY = Math.round(h * 0.12);
-            const faceW = Math.round(w * 0.44);
-            const faceH = Math.round(h * 0.58);
+            // Target center-weighted subject & person bounding region
+            const subX = Math.round(w * 0.22);
+            const subY = Math.round(h * 0.08);
+            const subW = Math.round(w * 0.56);
+            const subH = Math.round(h * 0.72);
 
-            // 1. Asymmetrical Upper Feature / Eye Drift (solid extra eye/brow shifted upward)
-            const eyeH = Math.round(faceH * 0.38);
-            const eyeShiftY = -Math.round(h * 0.035);
-            const eyeShiftX = Math.round(w * 0.015);
-            drawFeatheredSlice(
-                ctx, glitchCanvas,
-                faceX, faceY, faceW, eyeH,
-                faceX + eyeShiftX, faceY + eyeShiftY,
-                1.0 // 100% SOLID REAL COPY
+            ctx.save();
+
+            // 1. Primary Solid Angled Duplicate of Subject (duplicated downwards and to the right at an angle)
+            const angleDx = Math.round(w * 0.045);
+            const angleDy = Math.round(h * 0.055);
+            ctx.drawImage(
+                glitchCanvas,
+                subX, subY, subW, subH,
+                subX + angleDx, subY + angleDy, subW, subH
             );
 
-            // 2. Angled Lower Feature Duplicate (solid real nose/mouth duplicated downwards at an angle)
-            const noseY = faceY + Math.round(faceH * 0.32);
-            const noseH = Math.round(faceH * 0.44);
-            const noseAngleDx = Math.round(w * 0.035);
-            const noseAngleDy = Math.round(h * 0.045);
-
-            drawFeatheredSlice(
-                ctx, glitchCanvas,
-                faceX, noseY, faceW, noseH,
-                faceX + noseAngleDx, noseY + noseAngleDy,
-                1.0 // 100% SOLID REAL COPY
+            // 2. Displaced Upper Feature / Eye Offset (solid extra eye/brow shifted upward)
+            const eyeH = Math.round(subH * 0.35);
+            const eyeShiftX = Math.round(w * 0.018);
+            const eyeShiftY = -Math.round(h * 0.038);
+            ctx.drawImage(
+                glitchCanvas,
+                subX, subY, subW, eyeH,
+                subX + eyeShiftX, subY + eyeShiftY, subW, eyeH
             );
 
-            // 3. Left half face solid offset
-            const halfW = Math.round(faceW * 0.50);
-            const halfDx = -Math.round(w * 0.024);
-            const halfDy = -Math.round(h * 0.026);
-            drawFeatheredSlice(
-                ctx, glitchCanvas,
-                faceX, faceY, halfW, faceH,
-                faceX + halfDx, faceY + halfDy,
-                1.0 // 100% SOLID REAL COPY
+            // 3. Offset Left Half-Subject (displaced to the left)
+            const halfW = Math.round(subW * 0.50);
+            const halfDx = -Math.round(w * 0.030);
+            const halfDy = -Math.round(h * 0.025);
+            ctx.drawImage(
+                glitchCanvas,
+                subX, subY, halfW, subH,
+                subX + halfDx, subY + halfDy, halfW, subH
             );
+
+            ctx.restore();
         } catch (e) {
             console.warn('[FACE DISTORTION ERROR]', e);
         }
