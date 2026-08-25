@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.0.0-FULL-PIPELINE"
+APP_VERSION = "v4.0.1-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -1031,15 +1031,29 @@ class FaceDistortionEngine:
         if cls._cascade_ok is not None:
             return cls._cascade_ok
         try:
-            fp = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-            ep = cv2.data.haarcascades + 'haarcascade_eye.xml'
-            cls._face_cascade = cv2.CascadeClassifier(fp)
-            cls._eye_cascade  = cv2.CascadeClassifier(ep)
+            # OpenCV 5.x moved CascadeClassifier into cv2.objdetect; OpenCV 4.x has it at cv2.
+            _CC = getattr(cv2, 'CascadeClassifier', None)
+            if _CC is None:
+                _CC = getattr(getattr(cv2, 'objdetect', None), 'CascadeClassifier', None)
+            if _CC is None:
+                raise AttributeError("CascadeClassifier not in cv2 or cv2.objdetect")
+
+            # Haarcascades path: try cv2.data.haarcascades, fall back to empty string
+            _hc = ''
+            try:
+                _hc = cv2.data.haarcascades  # works on most OpenCV builds
+            except AttributeError:
+                pass
+
+            fp = _hc + 'haarcascade_frontalface_default.xml'
+            ep = _hc + 'haarcascade_eye.xml'
+            cls._face_cascade = _CC(fp)
+            cls._eye_cascade  = _CC(ep)
             if cls._face_cascade.empty():
                 dbg("Face cascade empty — face distortion disabled", "FACE")
                 cls._cascade_ok = False
             else:
-                dbg("Face+eye Haar cascades loaded OK", "FACE")
+                dbg(f"Face+eye Haar cascades loaded OK (cv2 v{cv2.__version__})", "FACE")
                 cls._cascade_ok = True
         except Exception as e:
             dbg(f"Haar cascade load error: {e}", "FACE")
@@ -1094,10 +1108,21 @@ class FaceDistortionEngine:
         small = cv2.resize(bgr_img, (w // scale, h // scale))
         gray_s = cv2.equalizeHist(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
 
-        faces = FaceDistortionEngine._face_cascade.detectMultiScale(
-            gray_s, scaleFactor=1.12, minNeighbors=4, minSize=(18, 18),
-            flags=cv2.CASCADE_SCALE_IMAGE
-        )
+        faces = []
+        try:
+            # flags=cv2.CASCADE_SCALE_IMAGE may not exist in OpenCV 5 — try without it too
+            _flags = getattr(cv2, 'CASCADE_SCALE_IMAGE', None)
+            if _flags is not None:
+                faces = FaceDistortionEngine._face_cascade.detectMultiScale(
+                    gray_s, scaleFactor=1.12, minNeighbors=4, minSize=(18, 18), flags=_flags
+                )
+            else:
+                faces = FaceDistortionEngine._face_cascade.detectMultiScale(
+                    gray_s, scaleFactor=1.12, minNeighbors=4, minSize=(18, 18)
+                )
+        except Exception as e:
+            dbg(f"detectMultiScale error: {e}", "FACE")
+            return bgr_img
         if len(faces) == 0:
             return bgr_img
 
@@ -1127,10 +1152,13 @@ class FaceDistortionEngine:
             # Eye detection in upper 60% of face ROI
             face_gray = cv2.cvtColor(out[fy:fy+int(fh*0.65), fx:fx+fw], cv2.COLOR_BGR2GRAY)
             eyes_found = []
-            if not FaceDistortionEngine._eye_cascade.empty():
-                eyes_found = FaceDistortionEngine._eye_cascade.detectMultiScale(
-                    face_gray, scaleFactor=1.1, minNeighbors=3, minSize=(8, 8)
-                )
+            try:
+                if FaceDistortionEngine._eye_cascade is not None and not FaceDistortionEngine._eye_cascade.empty():
+                    eyes_found = FaceDistortionEngine._eye_cascade.detectMultiScale(
+                        face_gray, scaleFactor=1.1, minNeighbors=3, minSize=(8, 8)
+                    )
+            except Exception:
+                eyes_found = []
             if len(eyes_found) > 0:
                 for (ex, ey, ew, eh) in eyes_found[:2]:
                     out = FaceDistortionEngine._eye_flare(
