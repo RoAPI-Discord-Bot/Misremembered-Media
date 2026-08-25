@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.6.2';
+const APP_VERSION = 'v2.6.3';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1539,33 +1539,108 @@ document.addEventListener('DOMContentLoaded', () => {
         return _faceFeatherCtx;
     }
 
-    // Draws a solid, real duplicated feature with seamless border edge feathering (0% ghosting, 100% solid real copy)
+    // Draws a solid, real duplicated feature with rectilinear linear edge blending (ZERO CIRCLES, 0% ghosting, 100% solid real copy)
     function drawFeatheredSlice(targetCtx, srcCanvas, sx, sy, sw, sh, dx, dy, opacity = 1.0) {
         if (sw <= 0 || sh <= 0 || opacity <= 0) return;
         const fCtx = getFaceFeatherCtx(sw, sh);
         fCtx.clearRect(0, 0, sw, sh);
 
-        // 1. Copy source slice
+        // 1. Copy source slice directly
         fCtx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
 
-        // 2. Feather ONLY the outer perimeter (outer 15%) so the interior is 100% SOLID & OPAQUE
+        // 2. Linear edge softening on 4 borders (NOT a circle!)
         fCtx.globalCompositeOperation = 'destination-in';
-        const grad = fCtx.createRadialGradient(
-            sw / 2, sh / 2, Math.min(sw, sh) * 0.35,
-            sw / 2, sh / 2, Math.min(sw, sh) * 0.50
-        );
-        grad.addColorStop(0, 'rgba(0,0,0,1)');
-        grad.addColorStop(0.85, 'rgba(0,0,0,1)'); // Solid 100% core
-        grad.addColorStop(1, 'rgba(0,0,0,0)');    // Soft outer boundary
-        fCtx.fillStyle = grad;
+        fCtx.fillStyle = '#000000';
         fCtx.fillRect(0, 0, sw, sh);
+
+        const featherPx = Math.max(2, Math.min(8, Math.floor(Math.min(sw, sh) * 0.06)));
+        if (featherPx > 1) {
+            // Top linear fade
+            const topGrad = fCtx.createLinearGradient(0, 0, 0, featherPx);
+            topGrad.addColorStop(0, 'rgba(0,0,0,0)');
+            topGrad.addColorStop(1, 'rgba(0,0,0,1)');
+            fCtx.fillStyle = topGrad;
+            fCtx.fillRect(0, 0, sw, featherPx);
+
+            // Bottom linear fade
+            const botGrad = fCtx.createLinearGradient(0, sh - featherPx, 0, sh);
+            botGrad.addColorStop(0, 'rgba(0,0,0,1)');
+            botGrad.addColorStop(1, 'rgba(0,0,0,0)');
+            fCtx.fillStyle = botGrad;
+            fCtx.fillRect(0, sh - featherPx, sw, featherPx);
+
+            // Left linear fade
+            const leftGrad = fCtx.createLinearGradient(0, 0, featherPx, 0);
+            leftGrad.addColorStop(0, 'rgba(0,0,0,0)');
+            leftGrad.addColorStop(1, 'rgba(0,0,0,1)');
+            fCtx.fillStyle = leftGrad;
+            fCtx.fillRect(0, 0, featherPx, sh);
+
+            // Right linear fade
+            const rightGrad = fCtx.createLinearGradient(sw - featherPx, 0, sw, 0);
+            rightGrad.addColorStop(0, 'rgba(0,0,0,1)');
+            rightGrad.addColorStop(1, 'rgba(0,0,0,0)');
+            fCtx.fillStyle = rightGrad;
+            fCtx.fillRect(sw - featherPx, 0, featherPx, sh);
+        }
+
         fCtx.globalCompositeOperation = 'source-over';
 
-        // 3. Draw onto target canvas with 100% solid opacity (looks like a real duplicate, not a ghost!)
+        // 3. Draw onto target canvas with 100% solid opacity
         targetCtx.save();
         targetCtx.globalAlpha = Math.min(1.0, opacity);
         targetCtx.drawImage(_faceFeatherCanvas, 0, 0, sw, sh, dx, dy, sw, sh);
         targetCtx.restore();
+    }
+
+    // Kane Pixels authentic solid facial & subject duplication (real physical copies, zero circular artifacts)
+    function applyFaceAndSubjectDistortion(w, h, intensity = 1.0) {
+        if (!toggleObjectMelt || !toggleObjectMelt.checked || intensity <= 0.05) return;
+
+        try {
+            // Target center-weighted face/subject area
+            const faceX = Math.round(w * 0.28);
+            const faceY = Math.round(h * 0.12);
+            const faceW = Math.round(w * 0.44);
+            const faceH = Math.round(h * 0.58);
+
+            // 1. Asymmetrical Upper Feature / Eye Drift (solid extra eye/brow shifted upward)
+            const eyeH = Math.round(faceH * 0.38);
+            const eyeShiftY = -Math.round(h * 0.035);
+            const eyeShiftX = Math.round(w * 0.015);
+            drawFeatheredSlice(
+                ctx, glitchCanvas,
+                faceX, faceY, faceW, eyeH,
+                faceX + eyeShiftX, faceY + eyeShiftY,
+                1.0 // 100% SOLID REAL COPY
+            );
+
+            // 2. Angled Lower Feature Duplicate (solid real nose/mouth duplicated downwards at an angle)
+            const noseY = faceY + Math.round(faceH * 0.32);
+            const noseH = Math.round(faceH * 0.44);
+            const noseAngleDx = Math.round(w * 0.035);
+            const noseAngleDy = Math.round(h * 0.045);
+
+            drawFeatheredSlice(
+                ctx, glitchCanvas,
+                faceX, noseY, faceW, noseH,
+                faceX + noseAngleDx, noseY + noseAngleDy,
+                1.0 // 100% SOLID REAL COPY
+            );
+
+            // 3. Left half face solid offset
+            const halfW = Math.round(faceW * 0.50);
+            const halfDx = -Math.round(w * 0.024);
+            const halfDy = -Math.round(h * 0.026);
+            drawFeatheredSlice(
+                ctx, glitchCanvas,
+                faceX, faceY, halfW, faceH,
+                faceX + halfDx, faceY + halfDy,
+                1.0 // 100% SOLID REAL COPY
+            );
+        } catch (e) {
+            console.warn('[FACE DISTORTION ERROR]', e);
+        }
     }
 
     // Renders all persistent word mutations with 100% CONSTANT, rock-solid coordinates (Zero Pulsing, Zero Flickering!)
@@ -1630,56 +1705,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         ctx.restore();
-    }
-
-    // Kane Pixels authentic solid facial & subject duplication (real physical copies, not translucent ghosts)
-    function applyFaceAndSubjectDistortion(w, h, intensity = 1.0) {
-        if (!toggleObjectMelt || !toggleObjectMelt.checked || intensity <= 0.05) return;
-
-        try {
-            // Target center-weighted face/subject area
-            const faceX = Math.round(w * 0.28);
-            const faceY = Math.round(h * 0.12);
-            const faceW = Math.round(w * 0.44);
-            const faceH = Math.round(h * 0.58);
-
-            // 1. Asymmetrical Upper Feature / Eye Drift (solid extra eye/brow shifted upward)
-            const eyeH = Math.round(faceH * 0.42);
-            const eyeShiftY = -Math.round(h * 0.038);
-            const eyeShiftX = Math.round(w * 0.018);
-            drawFeatheredSlice(
-                ctx, glitchCanvas,
-                faceX, faceY, faceW, eyeH,
-                faceX + eyeShiftX, faceY + eyeShiftY,
-                1.0 // 100% SOLID REAL COPY
-            );
-
-            // 2. Angled Lower Feature Duplicate (solid real nose/mouth duplicated downwards at an angle)
-            const noseY = faceY + Math.round(faceH * 0.35);
-            const noseH = Math.round(faceH * 0.48);
-            const noseAngleDx = Math.round(w * 0.040);
-            const noseAngleDy = Math.round(h * 0.050);
-
-            drawFeatheredSlice(
-                ctx, glitchCanvas,
-                faceX, noseY, faceW, noseH,
-                faceX + noseAngleDx, noseY + noseAngleDy,
-                1.0 // 100% SOLID REAL COPY
-            );
-
-            // 3. Left half face solid offset
-            const halfW = Math.round(faceW * 0.52);
-            const halfDx = -Math.round(w * 0.028);
-            const halfDy = -Math.round(h * 0.030);
-            drawFeatheredSlice(
-                ctx, glitchCanvas,
-                faceX, faceY, halfW, faceH,
-                faceX + halfDx, faceY + halfDy,
-                1.0 // 100% SOLID REAL COPY
-            );
-        } catch (e) {
-            console.warn('[FACE DISTORTION ERROR]', e);
-        }
     }
 
 
