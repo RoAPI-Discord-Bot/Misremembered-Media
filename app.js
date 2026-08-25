@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.5.4';
+const APP_VERSION = 'v2.5.5';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1308,12 +1308,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const colorDist = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
                 const lumDiff = Math.abs(lum - bgLum);
 
-                const threshold = 18;
-                if (colorDist < threshold * 1.8 && lumDiff < threshold) {
-                    d[i + 3] = 0; // 100% transparent background
+                // If within background color, make transparent; otherwise keep 100% SOLID & VIVID!
+                if (colorDist < 26 && lumDiff < 14) {
+                    d[i + 3] = 0; // Transparent background
                 } else {
-                    const factor = Math.min(1.0, Math.max(0.0, (Math.max(colorDist / 2, lumDiff) - threshold) / 8));
-                    d[i + 3] = Math.round(255 * factor);
+                    d[i + 3] = 255; // 100% solid, fully visible glyph!
                 }
             }
 
@@ -1529,20 +1528,26 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderMisrememberedText(ctx, canvasW, canvasH) {
         if (!detectedWordEntities.length) return;
 
-        // Ensure at least 1-3 words have active mutations
-        const mutated = detectedWordEntities.filter(w => w.mutation);
+        // Ensure at least 50% of words have active mutations
+        const mutated = detectedWordEntities.filter(w => w.mutation && w.glyphCanvas);
         if (mutated.length === 0 && detectedWordEntities.length > 0) {
-            const count = Math.min(detectedWordEntities.length, Math.max(1, Math.floor(detectedWordEntities.length * 0.5)));
+            const count = Math.min(detectedWordEntities.length, Math.max(1, Math.floor(detectedWordEntities.length * 0.6)));
             for (let i = 0; i < count; i++) {
                 mutateWordEntity(detectedWordEntities[i], canvasW, canvasH);
+                if (!detectedWordEntities[i].glyphCanvas) {
+                    detectedWordEntities[i].glyphCanvas = extractPureGlyphCanvas(
+                        detectedWordEntities[i].x, detectedWordEntities[i].y,
+                        detectedWordEntities[i].w, detectedWordEntities[i].h
+                    );
+                }
             }
         }
 
         ctx.save();
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
-        ctx.shadowBlur = 4;
-        ctx.shadowOffsetX = 1;
-        ctx.shadowOffsetY = 1;
+        ctx.shadowColor = '#000000';
+        ctx.shadowBlur = 8;
+        ctx.shadowOffsetX = 2;
+        ctx.shadowOffsetY = 2;
 
         for (const word of detectedWordEntities) {
             if (!word.mutation || !word.glyphCanvas) continue;
@@ -1550,7 +1555,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const m = word.mutation;
             if (m.type === 'floating_echo') {
                 ctx.save();
-                ctx.globalAlpha = m.alpha || 0.90;
+                ctx.globalAlpha = 0.95;
                 ctx.translate(m.destX + word.w / 2, m.destY + word.h / 2);
                 ctx.scale(-1, -1);
                 ctx.drawImage(word.glyphCanvas, -word.w / 2, -word.h / 2);
@@ -1560,7 +1565,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const destX = word.x + m.stepDx * s;
                     const destY = word.y + m.stepDy * s;
                     if (destX + word.w > canvasW || destY + word.h > canvasH) continue;
-                    const alpha = Math.max(0.12, 0.85 - s * 0.22);
+                    const alpha = Math.max(0.35, 0.95 - s * 0.18);
                     ctx.save();
                     ctx.globalAlpha = alpha;
                     const trimX = Math.min(word.w * 0.6, (s - 1) * (word.w / m.numSteps) * 0.6);
@@ -1573,7 +1578,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else if (m.type === 'glyph_flip') {
                 ctx.save();
-                ctx.globalAlpha = m.alpha || 0.88;
+                ctx.globalAlpha = 0.95;
                 ctx.translate(word.x + m.charOffset + m.charW, word.y);
                 ctx.scale(-1, 1);
                 ctx.drawImage(word.glyphCanvas, m.charOffset, 0, m.charW, word.h, 0, 0, m.charW, word.h);
@@ -1581,6 +1586,73 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         ctx.restore();
+    }
+
+    // Kane Pixels authentic facial & subject misremembering (Angled Duplication & Feature Drift)
+    function applyFaceAndSubjectDistortion(w, h, now) {
+        if (!toggleObjectMelt || !toggleObjectMelt.checked) return;
+
+        try {
+            // Target center-weighted face/subject area
+            const faceX = Math.round(w * 0.28);
+            const faceY = Math.round(h * 0.12);
+            const faceW = Math.round(w * 0.44);
+            const faceH = Math.round(h * 0.58);
+
+            // 1. Asymmetrical Upper Feature / Eye Drift (shift upper face up and slightly offset)
+            const eyeH = Math.round(faceH * 0.40);
+            ctx.save();
+            ctx.globalAlpha = 0.70;
+            const eyeShiftY = -Math.round(h * 0.035);
+            const eyeShiftX = Math.round(w * 0.015);
+            ctx.drawImage(
+                glitchCanvas,
+                faceX, faceY, faceW, eyeH,
+                faceX + eyeShiftX, faceY + eyeShiftY, faceW, eyeH
+            );
+            ctx.restore();
+
+            // 2. Angled Lower Feature Duplicate (Nose / Mouth displaced downwards at an angle)
+            const noseY = faceY + Math.round(faceH * 0.35);
+            const noseH = Math.round(faceH * 0.45);
+            const noseAngleDx = Math.round(w * 0.038);
+            const noseAngleDy = Math.round(h * 0.048);
+
+            // First overlapping duplicate
+            ctx.save();
+            ctx.globalAlpha = 0.78;
+            ctx.drawImage(
+                glitchCanvas,
+                faceX, noseY, faceW, noseH,
+                faceX + noseAngleDx, noseY + noseAngleDy, faceW, noseH
+            );
+            ctx.restore();
+
+            // Second subtle trailing duplicate at further angle
+            ctx.save();
+            ctx.globalAlpha = 0.42;
+            ctx.drawImage(
+                glitchCanvas,
+                faceX, noseY, faceW, noseH,
+                faceX + noseAngleDx * 1.8, noseY + noseAngleDy * 1.8, faceW, noseH
+            );
+            ctx.restore();
+
+            // 3. Left half face ghost displacement
+            const halfW = Math.round(faceW * 0.50);
+            ctx.save();
+            ctx.globalAlpha = 0.55;
+            const halfDx = -Math.round(w * 0.025);
+            const halfDy = -Math.round(h * 0.030);
+            ctx.drawImage(
+                glitchCanvas,
+                faceX, faceY, halfW, faceH,
+                faceX + halfDx, faceY + halfDy, halfW, faceH
+            );
+            ctx.restore();
+        } catch (e) {
+            console.warn('[FACE DISTORTION ERROR]', e);
+        }
     }
 
     // --- VISUAL INTERRUPT EVENTS ---
@@ -2077,22 +2149,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (mediaType === 'video') {
             if (sourceVideo.videoWidth > 0) {
                 captureFrameSnapshot();
-                maybeTriggerReplayBurst(now);
 
-                if (replayState) {
-                    drawReplayFrame(w, h, now);
-                } else {
-                    // Blit through an intermediate 2D canvas to bypass any
-                    // compositor-taint issue when sourceVideo is off-screen.
-                    try {
-                        const blitCtx = getVideoBlitCtx(w, h);
-                        blitCtx.drawImage(sourceVideo, 0, 0, w, h);
-                        ctx.drawImage(_videoBlitCanvas, 0, 0);
-                    } catch (e) {
-                        try { ctx.drawImage(sourceVideo, 0, 0, w, h); } catch (e2) {}
-                    }
+                // Blit through an intermediate 2D canvas to bypass any compositor-taint issue
+                try {
+                    const blitCtx = getVideoBlitCtx(w, h);
+                    blitCtx.drawImage(sourceVideo, 0, 0, w, h);
+                    ctx.drawImage(_videoBlitCanvas, 0, 0);
+                } catch (e) {
+                    try { ctx.drawImage(sourceVideo, 0, 0, w, h); } catch (e2) {}
+                }
 
-                    // --- BACKROOMS COMPLEX MRI ANALYSIS SWEEP ---
+                // --- BACKROOMS COMPLEX MRI ANALYSIS SWEEP ---
                     // When loading / playing media, a green/amber radar laser beam sweeps top-to-bottom
                     // like ASYNC / Backrooms Complex scanning memory files for anomaly targets
                     if (now < mriScanEndTime) {
@@ -2116,7 +2183,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         ctx.fillStyle = '#00ff66';
                         ctx.fillText(`[ASYNC MRI SCAN] ANOMALY DETECTED AT Y:${scanY}px`, 15, scanY - 16);
                     }
-                }
                 hasFrame = true;
             }
         } else if (mediaType === 'audio') {
@@ -2202,6 +2268,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (tapeWarmthFilter) tapeWarmthFilter.frequency.setTargetAtTime(11500, audioCtx.currentTime, 0.35);
                 spatialMonoUntil = 0;
             }
+        }
+
+        // --- KANE PIXELS FACE & SUBJECT MISREMEMBERING (Angled Feature Duplication) ---
+        if (toggleObjectMelt && toggleObjectMelt.checked) {
+            applyFaceAndSubjectDistortion(w, h, now);
         }
 
         // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Kane Pixels 'Forgets' Engine) ---
