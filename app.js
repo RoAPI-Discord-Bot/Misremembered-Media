@@ -4,7 +4,7 @@
  * and Kane Pixels 'Forgets' text distortion engine.
  */
 
-const APP_VERSION = 'v2.6.4';
+const APP_VERSION = 'v2.7.0';
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -1524,67 +1524,146 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    let _faceFeatherCanvas = null;
-    let _faceFeatherCtx = null;
+    let _warpOffscreenCanvas = null;
+    let _warpOffscreenCtx = null;
 
-    function getFaceFeatherCtx(w, h) {
-        if (!_faceFeatherCanvas) {
-            _faceFeatherCanvas = document.createElement('canvas');
+    function getWarpOffscreenCtx(w, h) {
+        if (!_warpOffscreenCanvas) {
+            _warpOffscreenCanvas = document.createElement('canvas');
         }
-        if (_faceFeatherCanvas.width !== w || _faceFeatherCanvas.height !== h) {
-            _faceFeatherCanvas.width = w;
-            _faceFeatherCanvas.height = h;
-            _faceFeatherCtx = _faceFeatherCanvas.getContext('2d');
+        if (_warpOffscreenCanvas.width !== w || _warpOffscreenCanvas.height !== h) {
+            _warpOffscreenCanvas.width = w;
+            _warpOffscreenCanvas.height = h;
+            _warpOffscreenCtx = _warpOffscreenCanvas.getContext('2d');
         }
-        return _faceFeatherCtx;
+        return _warpOffscreenCtx;
     }
 
-    // Kane Pixels authentic solid facial & subject duplication (real physical copy, zero circles, zero ghosting)
-    function applyFaceAndSubjectDistortion(w, h, intensity = 1.0) {
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 1. KANE PIXELS "STILL LIFE" SEAMLESS ANATOMICAL WARPING (Zero Box Seams)
+    // Continuous coordinate displacement map on subject features (Eye Drift & Multi-Jaw)
+    // ─────────────────────────────────────────────────────────────────────────────
+    function applyStillLifeAnatomicalWarp(w, h, intensity = 1.0) {
         if (!toggleObjectMelt || !toggleObjectMelt.checked || intensity <= 0.05) return;
 
         try {
-            // Target center-weighted subject & person bounding region
-            const subX = Math.round(w * 0.22);
+            const subX = Math.round(w * 0.24);
             const subY = Math.round(h * 0.08);
-            const subW = Math.round(w * 0.56);
-            const subH = Math.round(h * 0.72);
+            const subW = Math.round(w * 0.52);
+            const subH = Math.round(h * 0.68);
 
             ctx.save();
 
-            // 1. Primary Solid Angled Duplicate of Subject (duplicated downwards and to the right at an angle)
-            const angleDx = Math.round(w * 0.045);
-            const angleDy = Math.round(h * 0.055);
-            ctx.drawImage(
-                glitchCanvas,
-                subX, subY, subW, subH,
-                subX + angleDx, subY + angleDy, subW, subH
-            );
+            // A. Upper Eye & Brow Drift (Asymmetric feature displacement with smooth sine envelope)
+            const eyeStartY = subY + Math.round(subH * 0.12);
+            const eyeSpan = Math.round(subH * 0.30);
+            const sliceH = 3; // 3px scanline strips for continuous smooth deformation
 
-            // 2. Displaced Upper Feature / Eye Offset (solid extra eye/brow shifted upward)
-            const eyeH = Math.round(subH * 0.35);
-            const eyeShiftX = Math.round(w * 0.018);
-            const eyeShiftY = -Math.round(h * 0.038);
-            ctx.drawImage(
-                glitchCanvas,
-                subX, subY, subW, eyeH,
-                subX + eyeShiftX, subY + eyeShiftY, subW, eyeH
-            );
+            for (let y = 0; y < eyeSpan; y += sliceH) {
+                const normY = y / eyeSpan; // 0.0 to 1.0
+                const envelope = Math.sin(normY * Math.PI); // Smooth 0 -> 1 -> 0 curve (zero seam at ends)
+                
+                const shiftX = Math.round(w * 0.022 * intensity * envelope);
+                const shiftY = -Math.round(h * 0.032 * intensity * envelope);
 
-            // 3. Offset Left Half-Subject (displaced to the left)
-            const halfW = Math.round(subW * 0.50);
-            const halfDx = -Math.round(w * 0.030);
-            const halfDy = -Math.round(h * 0.025);
-            ctx.drawImage(
-                glitchCanvas,
-                subX, subY, halfW, subH,
-                subX + halfDx, subY + halfDy, halfW, subH
-            );
+                const srcY = eyeStartY + y;
+                if (srcY + sliceH > h) continue;
+
+                // Draw displaced scanline strip seamlessly across subject width
+                ctx.drawImage(
+                    glitchCanvas,
+                    subX, srcY, subW, sliceH,
+                    subX + shiftX, srcY + shiftY, subW, sliceH
+                );
+            }
+
+            // B. Angled Jaw / Secondary Mouth Duplication ("Still Life" entity manifestation)
+            const jawStartY = subY + Math.round(subH * 0.38);
+            const jawSpan = Math.round(subH * 0.42);
+
+            for (let y = 0; y < jawSpan; y += sliceH) {
+                const normY = y / jawSpan;
+                const envelope = Math.sin(normY * Math.PI);
+
+                const angleDx = Math.round(w * 0.038 * intensity * envelope);
+                const angleDy = Math.round(h * 0.046 * intensity * envelope);
+
+                const srcY = jawStartY + y;
+                if (srcY + sliceH > h) continue;
+
+                ctx.drawImage(
+                    glitchCanvas,
+                    subX, srcY, subW, sliceH,
+                    subX + angleDx, srcY + angleDy, subW, sliceH
+                );
+            }
 
             ctx.restore();
         } catch (e) {
-            console.warn('[FACE DISTORTION ERROR]', e);
+            console.warn('[STILL LIFE WARP ERROR]', e);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 2. "EVERYTHING MUST GO" SPATIAL & SIGN RECURSION
+    // Replicates commercial store signs & banners in perspective trails that sink/step
+    // ─────────────────────────────────────────────────────────────────────────────
+    function applyEverythingMustGoSignRecursion(w, h) {
+        if (!toggleObjectMelt || !toggleObjectMelt.checked || !detectedWordEntities.length) return;
+
+        try {
+            // Find prominent words or commercial title cards (e.g. Cap'n Clark's, Ottoman, Sale)
+            const prominentEntities = detectedWordEntities.filter(e => e.w > 40 && e.glyphCanvas).slice(0, 2);
+            if (!prominentEntities.length) return;
+
+            ctx.save();
+            for (const entity of prominentEntities) {
+                // Generate 3 perspective-receding step duplicates
+                const steps = [
+                    { scale: 0.88, dx: Math.round(w * 0.025), dy: Math.round(h * 0.020), alpha: 0.85 },
+                    { scale: 0.74, dx: Math.round(w * 0.050), dy: Math.round(h * 0.040), alpha: 0.65 },
+                    { scale: 0.60, dx: Math.round(w * 0.075), dy: Math.round(h * 0.060), alpha: 0.45 }
+                ];
+
+                for (const st of steps) {
+                    const scaledW = Math.round(entity.w * st.scale);
+                    const scaledH = Math.round(entity.h * st.scale);
+                    const destX = entity.x + st.dx;
+                    const destY = entity.y + st.dy;
+
+                    if (destX + scaledW > w || destY + scaledH > h) continue;
+
+                    ctx.save();
+                    ctx.globalAlpha = st.alpha;
+                    ctx.shadowColor = '#000000';
+                    ctx.shadowBlur = 6;
+                    ctx.drawImage(
+                        entity.glyphCanvas,
+                        0, 0, entity.w, entity.h,
+                        destX, destY, scaledW, scaledH
+                    );
+                    ctx.restore();
+                }
+            }
+            ctx.restore();
+        } catch (e) {
+            console.warn('[SIGN RECURSION ERROR]', e);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 3. THE COMPLEX "GREEN LIGHT" SPATIAL MATTER OVERWRITE
+    // Authentic green-chroma shadow emission during physical spatial shifts
+    // ─────────────────────────────────────────────────────────────────────────────
+    function applyComplexGreenShift(w, h, intensity = 1.0) {
+        if (intensity <= 0.55) return;
+        const greenSurge = (intensity - 0.55) / 0.45;
+
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        ctx.fillStyle = `rgba(0, ${Math.round(45 * greenSurge)}, ${Math.round(18 * greenSurge)}, ${0.14 * greenSurge})`;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
     }
 
     // Renders all persistent word mutations with 100% CONSTANT, rock-solid coordinates (Zero Pulsing, Zero Flickering!)
@@ -2286,9 +2365,14 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // --- KANE PIXELS FACE & SUBJECT MISREMEMBERING (Angled Feature Duplication with Feathering) ---
+        // --- KANE PIXELS "STILL LIFE" ANATOMICAL WARPING (Seamless Feature Drift & Jaw Duplication) ---
         if (toggleObjectMelt && toggleObjectMelt.checked && uncannyIntensity > 0.04) {
-            applyFaceAndSubjectDistortion(w, h, uncannyIntensity);
+            applyStillLifeAnatomicalWarp(w, h, uncannyIntensity);
+        }
+
+        // --- "EVERYTHING MUST GO" COMMERCIAL SIGN & BANNER PERSPECTIVE RECURSION ---
+        if (toggleObjectMelt && toggleObjectMelt.checked) {
+            applyEverythingMustGoSignRecursion(w, h);
         }
 
         // --- PERSISTENT MISREMEMBERED TEXT & GLYPH OVERLAY (Kane Pixels 'Forgets' Engine - Constant, Solid) ---
@@ -2299,6 +2383,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             renderMisrememberedText(ctx, w, h);
         }
+
+        // --- THE COMPLEX "GREEN LIGHT" SPATIAL MATTER OVERWRITE ---
+        applyComplexGreenShift(w, h, uncannyIntensity);
 
 
 
