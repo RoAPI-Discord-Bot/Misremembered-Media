@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.5.0-FULL-PIPELINE"
+APP_VERSION = "v4.5.1-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -588,11 +588,11 @@ class LocalGlyphCorruptor:
         # Sort text boxes top-to-bottom so lines are processed coherently
         text_boxes.sort(key=lambda b: (b[1], b[0]))
 
-        # ── STEP 1: Fully clean and inpaint ALL detected text regions on base image ──
+        # ── STEP 1: Fully clean and inpaint detected text regions on base image ──
         out = bgr_img.copy()
         box_data = []
 
-        for (bx, by, bw, bh) in text_boxes[:12]:
+        for (bx, by, bw, bh) in text_boxes[:6]:
             # Extended bounding area to fully encompass character ascenders and descenders
             px = max(6, int(bw * 0.08))
             py = max(8, int(bh * 0.35))
@@ -617,10 +617,10 @@ class LocalGlyphCorruptor:
                 _, text_mask = cv2.threshold(local_gray, int(mean_lum * 1.15), 255, cv2.THRESH_BINARY)
 
             # Dilate text mask to ensure entire character strokes are erased
-            text_mask = cv2.dilate(text_mask, np.ones((7, 7), np.uint8))
+            text_mask = cv2.dilate(text_mask, np.ones((5, 5), np.uint8))
 
-            # Fast localized inpainting of text pixels
-            local_clean = cv2.inpaint(local_patch, text_mask, 5, cv2.INPAINT_TELEA)
+            # Fast localized inpainting (radius 3 for speed)
+            local_clean = cv2.inpaint(local_patch, text_mask, 3, cv2.INPAINT_TELEA)
             out[ry:ry+rh, rx:rx+rw] = local_clean
 
             box_data.append((bx, by, bw, bh, rx, ry, rw, rh, is_light_bg))
@@ -1605,9 +1605,19 @@ class MisrememberedEngine:
         # PHOTO + VIDEO EFFECTS (Smooth & Optimized)
         # ══════════════════════════════════════════════════════════
 
-        # ── NON-EUCLIDEAN BACKGROUND / OBJECT STRETCH (both) ──
+        # ── NON-EUCLIDEAN BACKGROUND / OBJECT STRETCH ──
+        # In videos, triggers as a sudden 1.2s reality-stretching anomaly event (once every 12s)
+        # In photos, applies standard static displacement
         if still_v > 0.05:
-            out = NonEuclideanWarp.apply(out, rng, intensity=still_v * master_v * 0.75, t_sec=t_sec)
+            if is_video:
+                warp_cycle = t_sec % 12.0
+                # Anomaly surge window: 4.0s to 5.2s in each 12s loop (1.2s duration)
+                if 4.0 <= warp_cycle < 5.2:
+                    dt_w = (warp_cycle - 4.0) / 1.2 # 0.0 to 1.0
+                    warp_env = np.sin(dt_w * np.pi) ** 1.5 # smooth bell curve envelope
+                    out = NonEuclideanWarp.apply(out, rng, intensity=still_v * master_v * warp_env * 0.90, t_sec=t_sec)
+            else:
+                out = NonEuclideanWarp.apply(out, rng, intensity=still_v * master_v * 0.75, t_sec=0.0)
 
         # ── STILL LIFE ANATOMICAL RECONSTRUCTION (fast skin blob — both) ──
         if self.use_still_life and still_v > 0.05:
