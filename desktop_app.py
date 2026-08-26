@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.4.2-FULL-PIPELINE"
+APP_VERSION = "v4.4.3-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -543,43 +543,53 @@ class LocalGlyphCorruptor:
         h, w = bgr_img.shape[:2]
         gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
 
-        # ── STEP 0: Detect text regions (Sobel gradient at half-res for speed) ──
+        # ── STEP 0: Multi-scale text region detection ──
+        # Detect high-contrast text strokes via morphological gradient + thresholding
         scale_factor = 2
-        gray_small = cv2.resize(gray, (w // scale_factor, h // scale_factor),
-                                interpolation=cv2.INTER_LINEAR)
-        grad_x = cv2.Sobel(gray_small, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(gray_small, cv2.CV_32F, 0, 1, ksize=3)
-        grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE,
-                                cv2.getStructuringElement(cv2.MORPH_RECT, (8, 2)))
-        grad_norm = cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        _, thresh_small = cv2.threshold(grad_norm, 55, 255, cv2.THRESH_BINARY)
-        connected_small = cv2.morphologyEx(thresh_small, cv2.MORPH_CLOSE,
-                                           cv2.getStructuringElement(cv2.MORPH_RECT, (10, 4)))
-        contours_small, _ = cv2.findContours(connected_small, cv2.RETR_EXTERNAL,
-                                             cv2.CHAIN_APPROX_SIMPLE)
+        gray_small = cv2.resize(gray, (w // scale_factor, h // scale_factor), interpolation=cv2.INTER_LINEAR)
+        
+        # Morphological gradient captures text edges accurately across all font weights
+        kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        morph_grad = cv2.morphologyEx(gray_small, cv2.MORPH_GRADIENT, kernel_grad)
+        
+        # Horizontal connecting element groups character glyphs into full line bounding boxes
+        kernel_conn = cv2.getStructuringElement(cv2.MORPH_RECT, (14, 3))
+        connected_small = cv2.morphologyEx(morph_grad, cv2.MORPH_CLOSE, kernel_conn)
+        
+        # Adaptive thresholding to capture clean binary text clusters
+        _, thresh_small = cv2.threshold(connected_small, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh_small = cv2.dilate(thresh_small, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 2)))
+        
+        contours_small, _ = cv2.findContours(thresh_small, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Collect valid text bounding boxes (filter by size/aspect)
+        # Collect valid text bounding boxes
         text_boxes = []
         for cnt in contours_small:
             sx, sy, sbw, sbh = cv2.boundingRect(cnt)
             bx, by = sx * scale_factor, sy * scale_factor
             bw, bh = sbw * scale_factor, sbh * scale_factor
             aspect = bw / float(max(1, bh))
-            if (25 < bw < w * 0.95 and 10 < bh < h * 0.40
-                    and aspect > 1.1 and bw * bh > 350):
+            area = bw * bh
+            
+            # Filter out whole-screen background noise or microscopic dots
+            if (15 < bw < w * 0.98 and 8 < bh < h * 0.45 and aspect > 0.8 and area > 200):
                 if rng.random() <= intensity:
                     text_boxes.append((bx, by, bw, bh))
 
         if not text_boxes:
             return bgr_img
 
+        # Sort text boxes top-to-bottom so lines are processed coherently
+        text_boxes.sort(key=lambda b: (b[1], b[0]))
+
         # ── STEP 1: Fully clean and inpaint ALL detected text regions on base image ──
         out = bgr_img.copy()
         box_data = []
 
-        for (bx, by, bw, bh) in text_boxes[:8]:
-            px = max(4, int(bw * 0.12))
-            py = max(6, int(bh * 0.50))
+        for (bx, by, bw, bh) in text_boxes[:12]:
+            # Extended bounding area to fully encompass character ascenders and descenders
+            px = max(6, int(bw * 0.08))
+            py = max(8, int(bh * 0.35))
             rx = max(0, bx - px);      ry = max(0, by - py)
             rw = min(w - rx, bw + px * 2); rh = min(h - ry, bh + py * 2)
 
@@ -587,19 +597,26 @@ class LocalGlyphCorruptor:
             if local_patch.size == 0:
                 continue
 
-            # Accurate local mask targeting the text area inside the patch
-            loc_mask = np.zeros((rh, rw), dtype=np.uint8)
-            lx0 = max(0, bx - rx); ly0 = max(0, by - ry)
-            lx1 = min(rw, bx + bw - rx); ly1 = min(rh, by + bh - ry)
-            loc_mask[ly0:ly1, lx0:lx1] = 255
-            loc_mask = cv2.dilate(loc_mask, np.ones((7, 7), np.uint8))
+            local_gray = cv2.cvtColor(local_patch, cv2.COLOR_BGR2GRAY)
+            # Find the actual text pixels inside the patch using local thresholding
+            # Determine if background is light or dark
+            mean_lum = np.mean(local_gray)
+            is_light_bg = mean_lum > 128
 
-            # Inpaint local area
-            local_clean = cv2.inpaint(local_patch, loc_mask, 5, cv2.INPAINT_TELEA)
+            if is_light_bg:
+                # Text is dark pixels on light background
+                _, text_mask = cv2.threshold(local_gray, int(mean_lum * 0.85), 255, cv2.THRESH_BINARY_INV)
+            else:
+                # Text is light pixels on dark background
+                _, text_mask = cv2.threshold(local_gray, int(mean_lum * 1.15), 255, cv2.THRESH_BINARY)
+
+            # Dilate text mask to ensure entire character strokes are erased
+            text_mask = cv2.dilate(text_mask, np.ones((7, 7), np.uint8))
+
+            # Fast localized inpainting of text pixels
+            local_clean = cv2.inpaint(local_patch, text_mask, 5, cv2.INPAINT_TELEA)
             out[ry:ry+rh, rx:rx+rw] = local_clean
 
-            bg_brightness = float(np.mean(local_clean))
-            is_light_bg   = bg_brightness > 128
             box_data.append((bx, by, bw, bh, rx, ry, rw, rh, is_light_bg))
 
         # ── STEP 2: Render corrupted replacement text on the clean background ──
@@ -610,20 +627,18 @@ class LocalGlyphCorruptor:
                            "times.ttf", "trebuc.ttf"]
 
         for (bx, by, bw, bh, rx, ry, rw, rh, is_light_bg) in box_data:
-            # Text colour: contrast against local background
             if is_light_bg:
                 fg = (rng.randint(0, 30), rng.randint(0, 30), rng.randint(0, 30))
             else:
                 fg = (rng.randint(220, 255), rng.randint(220, 255), rng.randint(220, 255))
 
             # Estimate word count from bbox width/height ratio
-            est_words = max(1, int(bw / max(1, bh * 4.5)))
+            est_words = max(1, int(round(bw / max(1, bh * 3.5))))
             words = [LocalGlyphCorruptor.generate_phonetic_mutation(
-                        rng.randint(3, 9), rng) for _ in range(est_words)]
+                        rng.randint(3, 8), rng) for _ in range(est_words)]
             replacement = " ".join(words)
 
-            # Font: vary size slightly to mimic AI not knowing exact size
-            f_size = max(10, int(bh * rng.uniform(0.60, 0.85)))
+            f_size = max(11, int(bh * rng.uniform(0.65, 0.90)))
             font = None
             for fc in [rng.choice(font_candidates), "arial.ttf"]:
                 try:
@@ -633,12 +648,11 @@ class LocalGlyphCorruptor:
             if font is None:
                 font = ImageFont.load_default()
 
-            # Position: within the original bbox, slight random offset
-            tx = bx + rng.randint(0, max(1, int(bw * 0.04)))
-            ty = by + max(0, int((bh - f_size) / 2)) + rng.randint(-2, 2)
+            tx = bx + rng.randint(0, max(1, int(bw * 0.03)))
+            ty = by + max(0, int((bh - f_size) / 2)) + rng.randint(-1, 1)
             draw.text((tx, ty), replacement, fill=fg, font=font)
 
-        # ── STEP 3: Apply ghost + strip distortions to each replacement region ──
+        # ── STEP 3: Apply subtle glyph distortions to each replacement region ──
         out = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
         for (bx, by, bw, bh, rx, ry, rw, rh, _) in box_data:
@@ -646,20 +660,12 @@ class LocalGlyphCorruptor:
             if patch.size == 0:
                 continue
 
-            # Ghost offset (subtle trailing shadow of the replacement text)
-            if rng.random() < 0.70:
-                gx = rng.choice([-1, 1]) * rng.randint(1, max(2, int(rw * 0.03)))
-                gy = rng.choice([-1, 1]) * rng.randint(1, max(2, int(rh * 0.07)))
-                Mg = np.float32([[1, 0, gx], [0, 1, gy]])
-                ghost = cv2.warpAffine(patch, Mg, (rw, rh), borderMode=cv2.BORDER_REFLECT)
-                patch = cv2.addWeighted(patch, 0.68, ghost, 0.32, 0)
-
-            # Strip micro-shift serration
+            # Razor serration (horizontal slice jitter on replacement glyphs)
             if intensity > 0.35:
                 sw = max(2, int(rh * 0.15))
                 for sp in range(0, rw, sw * 2):
                     ep = min(rw, sp + sw)
-                    sft = rng.choice([-1, 1]) * rng.randint(0, max(1, int(rh * 0.07)))
+                    sft = rng.choice([-1, 1]) * rng.randint(0, max(1, int(rh * 0.06)))
                     Ms = np.float32([[1, 0, 0], [0, 1, sft]])
                     patch[:, sp:ep] = cv2.warpAffine(
                         patch[:, sp:ep], Ms, (ep - sp, rh), borderMode=cv2.BORDER_REFLECT)
