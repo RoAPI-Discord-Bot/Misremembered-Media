@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.3.1-FULL-PIPELINE"
+APP_VERSION = "v4.4.0-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -545,132 +545,136 @@ class LocalGlyphCorruptor:
         h, w = bgr_img.shape[:2]
         gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
 
-        # Detect text regions at half resolution for speed
+        # ── STEP 0: Detect text regions (Sobel gradient at half-res for speed) ──
         scale_factor = 2
-        gray_small = cv2.resize(gray, (w // scale_factor, h // scale_factor), interpolation=cv2.INTER_LINEAR)
+        gray_small = cv2.resize(gray, (w // scale_factor, h // scale_factor),
+                                interpolation=cv2.INTER_LINEAR)
         grad_x = cv2.Sobel(gray_small, cv2.CV_32F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray_small, cv2.CV_32F, 0, 1, ksize=3)
         grad = cv2.morphologyEx(np.abs(grad_x) + np.abs(grad_y), cv2.MORPH_CLOSE,
                                 cv2.getStructuringElement(cv2.MORPH_RECT, (8, 2)))
         grad_norm = cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        _, thresh = cv2.threshold(grad_norm, 55, 255, cv2.THRESH_BINARY)
-        connected = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE,
-                                     cv2.getStructuringElement(cv2.MORPH_RECT, (10, 4)))
-        contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        _, thresh_small = cv2.threshold(grad_norm, 55, 255, cv2.THRESH_BINARY)
+        connected_small = cv2.morphologyEx(thresh_small, cv2.MORPH_CLOSE,
+                                           cv2.getStructuringElement(cv2.MORPH_RECT, (10, 4)))
+        contours_small, _ = cv2.findContours(connected_small, cv2.RETR_EXTERNAL,
+                                             cv2.CHAIN_APPROX_SIMPLE)
 
-        # Work on PIL canvas from the start — this will be our output
-        pil_img = Image.fromarray(cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(pil_img)
-
-        corrupted_count = 0
-        max_corrupt = 7
-
-        for cnt in contours:
-            if corrupted_count >= max_corrupt:
-                break
-
+        # Collect valid text bounding boxes (filter by size/aspect)
+        text_boxes = []
+        for cnt in contours_small:
             sx, sy, sbw, sbh = cv2.boundingRect(cnt)
-            x, y = sx * scale_factor, sy * scale_factor
+            bx, by = sx * scale_factor, sy * scale_factor
             bw, bh = sbw * scale_factor, sbh * scale_factor
             aspect = bw / float(max(1, bh))
-            area = bw * bh
+            if (25 < bw < w * 0.95 and 10 < bh < h * 0.40
+                    and aspect > 1.1 and bw * bh > 350):
+                if rng.random() <= intensity:
+                    text_boxes.append((bx, by, bw, bh))
 
-            if not (25 < bw < w * 0.95 and 10 < bh < h * 0.40 and aspect > 1.1 and area > 350):
+        if not text_boxes:
+            return bgr_img
+
+        # ── STEP 1 & 2: Clean background locally and render replacement text ──
+        # Instead of running expensive full-frame cv2.inpaint on 1080p/4K frames (which destroys FPS),
+        # we inpaint ONLY the local bounding boxes + margin directly on the canvas!
+        out = bgr_img.copy()
+        pil_img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+
+        font_candidates = ["arial.ttf", "arialbd.ttf", "calibri.ttf", "verdana.ttf",
+                           "times.ttf", "trebuc.ttf"]
+
+        for (bx, by, bw, bh) in text_boxes[:8]:
+            # Crop local region with margins to perform ultra-fast localized inpaint
+            px = max(4, int(bw * 0.10))
+            py = max(6, int(bh * 0.45))
+            rx = max(0, bx - px);      ry = max(0, by - py)
+            rw = min(w - rx, bw + px * 2); rh = min(h - ry, bh + py * 2)
+
+            local_patch = out[ry:ry+rh, rx:rx+rw]
+            if local_patch.size == 0:
                 continue
-            if rng.random() > intensity:
-                continue
 
-            roi_gray = gray[y:y+bh, x:x+bw]
-            if roi_gray.size == 0:
-                continue
+            # Local mask for this specific box
+            loc_mask = np.zeros((rh, rw), dtype=np.uint8)
+            lx0 = max(0, bx - rx); ly0 = max(0, by - ry)
+            lx1 = min(rw, bx + bw - rx); ly1 = min(rh, by + bh - ry)
+            loc_mask[ly0:ly1, lx0:lx1] = 255
+            loc_mask = cv2.dilate(loc_mask, np.ones((5, 5), np.uint8))
 
-            is_white_bg = np.mean(roi_gray) > 135
-            bg_col = (255, 255, 255) if is_white_bg else (10, 10, 10)
-            fg_col = (10, 10, 10) if is_white_bg else (240, 240, 240)
+            # Ultra fast local inpaint (tiny sub-rectangle only)
+            local_clean = cv2.inpaint(local_patch, loc_mask, 5, cv2.INPAINT_TELEA)
+            out[ry:ry+rh, rx:rx+rw] = local_clean
 
-            # ── STEP 1: ERASE the original text ──
-            # Sobel gradient bbox captures only character EDGES, not full glyph bodies.
-            # Expand significantly to fully cover ascenders, descenders, and thick strokes.
-            pad_x = int(bw * 0.08)
-            pad_y = int(bh * 0.40)   # large vertical pad — ascenders/descenders extend far beyond edge bbox
-            ex = max(0, x - pad_x)
-            ey = max(0, y - pad_y)
-            ew = min(w - ex, bw + pad_x * 2)
-            eh = min(h - ey, bh + pad_y * 2)
-            draw.rectangle([ex, ey, ex + ew, ey + eh], fill=bg_col)
+            # Update PIL image slice
+            local_clean_rgb = cv2.cvtColor(local_clean, cv2.COLOR_BGR2RGB)
+            pil_img.paste(Image.fromarray(local_clean_rgb), (rx, ry))
 
-            # ── STEP 2: Render corrupted replacement text in same area ──
-            # Word count estimated from region width
-            est_word_count = max(1, int(bw / max(1, bh * 4.5)))
-            words = []
-            for _ in range(est_word_count):
-                wlen = rng.randint(3, 9)
-                words.append(LocalGlyphCorruptor.generate_phonetic_mutation(wlen, rng))
+            # Sample the local background colour
+            bg_brightness = float(np.mean(local_clean))
+            is_light_bg   = bg_brightness > 128
+
+            # Text colour: contrast against local background
+            if is_light_bg:
+                fg = (rng.randint(0, 40), rng.randint(0, 40), rng.randint(0, 40))
+            else:
+                fg = (rng.randint(210, 255), rng.randint(210, 255), rng.randint(210, 255))
+
+            # Estimate word count from bbox width/height ratio
+            est_words = max(1, int(bw / max(1, bh * 4.5)))
+            words = [LocalGlyphCorruptor.generate_phonetic_mutation(
+                        rng.randint(3, 9), rng) for _ in range(est_words)]
             replacement = " ".join(words)
 
-            # Font size: stay close to original height, vary slightly
-            f_size = max(10, int(bh * rng.uniform(0.55, 0.82)))
-            try:
-                # Vary the font between a few system fonts for the "different font" effect
-                font_candidates = ["arial.ttf", "arialbd.ttf", "calibri.ttf", "verdana.ttf",
-                                   "times.ttf", "couri.ttf"]
-                chosen_font = rng.choice(font_candidates)
-                font = ImageFont.truetype(chosen_font, f_size)
-            except Exception:
+            # Font: vary size slightly to mimic AI not knowing exact size
+            f_size = max(10, int(bh * rng.uniform(0.60, 0.85)))
+            font = None
+            for fc in [rng.choice(font_candidates), "arial.ttf"]:
                 try:
-                    font = ImageFont.truetype("arial.ttf", f_size)
+                    font = ImageFont.truetype(fc, f_size); break
                 except Exception:
-                    font = ImageFont.load_default()
+                    continue
+            if font is None:
+                font = ImageFont.load_default()
 
-            # Position: same region, slightly different x/y for that "AI re-typed it slightly off" feel
-            tx = ex + rng.randint(2, max(3, int(bw * 0.05)))
-            ty = ey + max(1, int((eh - f_size) / 2))
-            draw.text((tx, ty), replacement, fill=fg_col, font=font)
+            # Position: within the original bbox, slight random offset
+            tx = bx + rng.randint(0, max(1, int(bw * 0.04)))
+            ty = by + max(0, int((bh - f_size) / 2)) + rng.randint(-2, 2)
+            draw.text((tx, ty), replacement, fill=fg, font=font)
 
-            # ── STEP 3: Convert back to BGR patch and apply distortions ──
-            # (apply glyph distortions to the REPLACEMENT text, not original)
-            # Use the expanded erase box coords so we distort the full replacement area
-            out_so_far = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-            patch = out_so_far[ey:ey+eh, ex:ex+ew].copy()
+        # ── STEP 3: Apply ghost + strip distortions to each replacement region ──
+        out = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+        for (bx, by, bw, bh) in text_boxes[:8]:
+            px = max(4, int(bw * 0.10)); py = max(6, int(bh * 0.45))
+            rx = max(0, bx - px); ry = max(0, by - py)
+            rw = min(w - rx, bw + px * 2); rh = min(h - ry, bh + py * 2)
+            patch = out[ry:ry+rh, rx:rx+rw].copy()
             if patch.size == 0:
-                corrupted_count += 1
                 continue
 
-            # Ghost offset duplicate (subtle — 3-6% shift)
-            if rng.random() < 0.75:
-                shift_x = rng.choice([-1, 1]) * rng.randint(1, max(2, int(ew * 0.03)))
-                shift_y = rng.choice([-1, 1]) * rng.randint(1, max(2, int(eh * 0.08)))
-                M = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-                ghost = cv2.warpAffine(patch, M, (ew, eh), borderMode=cv2.BORDER_REFLECT)
-                patch = cv2.addWeighted(patch, 0.65, ghost, 0.35, 0)
+            # Ghost offset (subtle trailing shadow of the replacement text)
+            if rng.random() < 0.70:
+                gx = rng.choice([-1, 1]) * rng.randint(1, max(2, int(rw * 0.03)))
+                gy = rng.choice([-1, 1]) * rng.randint(1, max(2, int(rh * 0.07)))
+                Mg = np.float32([[1, 0, gx], [0, 1, gy]])
+                ghost = cv2.warpAffine(patch, Mg, (rw, rh), borderMode=cv2.BORDER_REFLECT)
+                patch = cv2.addWeighted(patch, 0.68, ghost, 0.32, 0)
 
-            # Vertical strip micro-shift (razor serration)
-            if intensity > 0.30:
-                strip_w = max(2, int(eh * 0.16))
-                for sx_pos in range(0, ew, strip_w * 2):
-                    ex_pos = min(ew, sx_pos + strip_w)
-                    shift = rng.choice([-1, 1]) * rng.randint(0, max(1, int(eh * 0.08)))
-                    Mp = np.float32([[1, 0, 0], [0, 1, shift]])
-                    patch[:, sx_pos:ex_pos] = cv2.warpAffine(
-                        patch[:, sx_pos:ex_pos], Mp, (ex_pos - sx_pos, eh),
-                        borderMode=cv2.BORDER_REFLECT
-                    )
+            # Strip micro-shift serration
+            if intensity > 0.35:
+                sw = max(2, int(rh * 0.15))
+                for sp in range(0, rw, sw * 2):
+                    ep = min(rw, sp + sw)
+                    sft = rng.choice([-1, 1]) * rng.randint(0, max(1, int(rh * 0.07)))
+                    Ms = np.float32([[1, 0, 0], [0, 1, sft]])
+                    patch[:, sp:ep] = cv2.warpAffine(
+                        patch[:, sp:ep], Ms, (ep - sp, rh), borderMode=cv2.BORDER_REFLECT)
 
-            # Bisect + invert lower half (40% chance)
-            if intensity > 0.40 and rng.random() < 0.40:
-                half_h = eh // 2
-                if half_h > 2:
-                    flipped_lower = cv2.flip(patch[half_h:, :], -1)
-                    patch[half_h:, :] = cv2.addWeighted(flipped_lower, 0.80, patch[half_h:, :], 0.20, 0)
+            out[ry:ry+rh, rx:rx+rw] = patch
 
-            # Write the distorted patch back (use expanded box coords)
-            out_so_far[ey:ey+eh, ex:ex+ew] = patch
-            pil_img = Image.fromarray(cv2.cvtColor(out_so_far, cv2.COLOR_BGR2RGB))
-            draw = ImageDraw.Draw(pil_img)
-
-            corrupted_count += 1
-
-        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        return out
 
 
 
@@ -1972,31 +1976,42 @@ class MisrememberedDesktopApp(ctk.CTk):
             temp_out_wav = os.path.join(tempfile.gettempdir(), f"_temp_out_{int(time.time())}.wav")
 
             cap = cv2.VideoCapture(in_path)
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            # Cap export FPS to 30.0 max — 60 FPS doubles processing time for no aesthetic benefit
+            fps = min(30.0, raw_fps)
+            frame_step = max(1, int(round(raw_fps / fps))) if raw_fps > 35.0 else 1
             orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 300
+            raw_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 300
+            total_frames = max(1, raw_total_frames // frame_step)
 
             target_w, target_h = orig_w, orig_h
-            if orig_w > 1280:
-                target_w = 1280
-                target_h = int(orig_h * (1280 / orig_w))
+            if orig_w > 1280 or orig_h > 1280:
+                scale = 1280.0 / max(orig_w, orig_h)
+                target_w = int(orig_w * scale)
+                target_h = int(orig_h * scale)
 
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(temp_video, fourcc, fps, (target_w, target_h))
 
             frame_idx = 0
+            raw_idx = 0
             start_t = time.time()
 
-            self.add_log(f"Reconstruction Export: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
-            dbg(f"Video Export started: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f}fps, total={total_frames}", "EXPORT")
+            self.add_log(f"Reconstruction Export: {orig_w}x{orig_h} ({raw_fps:.1f}fps) -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
+            dbg(f"Video Export started: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f}fps (step={frame_step}), total={total_frames}", "EXPORT")
 
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                if orig_w != target_w:
+                if frame_step > 1 and (raw_idx % frame_step != 0):
+                    raw_idx += 1
+                    continue
+                raw_idx += 1
+
+                if orig_w != target_w or orig_h != target_h:
                     frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
                 # Identical deterministic temporal seed ensures 100% parity with preview!
