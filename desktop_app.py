@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.4.4-FULL-PIPELINE"
+APP_VERSION = "v4.5.0-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -111,10 +111,11 @@ NO_SIGNAL_LANGS = [
 # ─────────────────────────────────────────────────────────────────────────────
 class KanePixelsAudioDSP:
     @staticmethod
-    def synthesize_fluorescent_hum(n_samples, sr=44100, gain=0.032):
-        """Generates authentic Backrooms 60Hz + harmonic fluorescent light buzz."""
+    def synthesize_fluorescent_hum(n_samples, sr=44100, gain=0.038):
+        """Generates authentic Backrooms 60Hz + harmonic fluorescent light buzz with high-pitched ballast/CRT whine."""
         t = np.linspace(0, n_samples / sr, n_samples, endpoint=False)
-        hum = (
+        # Deep 60Hz ballast transformer hum
+        low_hum = (
             0.48 * np.sin(2 * np.pi * 60 * t) +
             0.36 * np.sin(2 * np.pi * 120 * t) +
             0.22 * np.sin(2 * np.pi * 180 * t) +
@@ -122,9 +123,17 @@ class KanePixelsAudioDSP:
             0.08 * np.sin(2 * np.pi * 360 * t) +
             0.05 * np.sin(2 * np.pi * 480 * t)
         )
+        # High-pitched piercing fluorescent light capacitor buzz & CRT 15.7kHz flyback whine
+        high_whine = (
+            0.18 * np.sin(2 * np.pi * 1200 * t) +
+            0.14 * np.sin(2 * np.pi * 3180 * t) +
+            0.10 * np.sin(2 * np.pi * 4800 * t) +
+            0.08 * np.sin(2 * np.pi * 8400 * t) +
+            0.06 * np.sin(2 * np.pi * 15734 * t) # CRT television / monitor flyback whine
+        )
         mod = 0.85 + 0.15 * np.sin(2 * np.pi * 0.4 * t) + 0.08 * np.sin(2 * np.pi * 2.3 * t)
         noise = np.random.normal(0, 0.035, n_samples)
-        out = (hum * mod + noise) * gain
+        out = ((low_hum + high_whine) * mod + noise) * gain
         return np.column_stack((out, out)).astype(np.float32)
 
     @staticmethod
@@ -410,11 +419,11 @@ class KanePixelsAudioDSP:
         if green_v > 0.10:
             mixed = KanePixelsAudioDSP.apply_green_light_audio_surge(mixed, sr=sr, duration_s=duration_s, intensity=green_v * master_v)
 
-        # 7. Inject No Signal audio at each no_signal window (every 18s cycle at 13.5s mark)
+        # 7. Inject No Signal audio at each no_signal window (every 18s cycle at 12.8s mark)
         # Uses real emg_audio_f (the emg.mp3 loaded by export thread) if available,
         # otherwise falls back to the procedural synthesized jingle.
         if master_v > 0.30:
-            no_signal_dur = 0.80   # matches 13.5s–14.3s visual window
+            no_signal_dur = 1.80   # matches longer 12.8s–14.6s visual window
             ns_n = int(sr * no_signal_dur)
 
             if emg_audio_f is not None:
@@ -434,7 +443,7 @@ class KanePixelsAudioDSP:
             cycle_time = 18.0
             t_sec = 0.0
             while t_sec < duration_s:
-                event_t = t_sec + 13.5
+                event_t = t_sec + 12.8
                 if event_t < duration_s:
                     idx0 = int(event_t * sr)
                     idx1 = min(n_samples, idx0 + ns_n)
@@ -649,7 +658,7 @@ class LocalGlyphCorruptor:
             ty = by + max(0, int((bh - f_size) / 2)) + rng.randint(-1, 1)
             draw.text((tx, ty), replacement, fill=fg, font=font)
 
-        # ── STEP 3: Apply subtle glyph distortions to each replacement region ──
+        # ── STEP 3: Apply Kane Pixels melting drip & glyph stretch distortions ──
         out = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
         for (bx, by, bw, bh, rx, ry, rw, rh, _) in box_data:
@@ -657,7 +666,7 @@ class LocalGlyphCorruptor:
             if patch.size == 0:
                 continue
 
-            # Razor serration (horizontal slice jitter on replacement glyphs)
+            # 1. Razor serration (horizontal slice jitter on replacement glyphs)
             if intensity > 0.35:
                 sw = max(2, int(rh * 0.15))
                 for sp in range(0, rw, sw * 2):
@@ -666,6 +675,24 @@ class LocalGlyphCorruptor:
                     Ms = np.float32([[1, 0, 0], [0, 1, sft]])
                     patch[:, sp:ep] = cv2.warpAffine(
                         patch[:, sp:ep], Ms, (ep - sp, rh), borderMode=cv2.BORDER_REFLECT)
+
+            # 2. Downward viscous melting / glyph drip effect (Kane Pixels Found Footage text melt)
+            if intensity > 0.40 and rng.random() < 0.75:
+                melt_grid_y, melt_grid_x = np.mgrid[0:rh, 0:rw].astype(np.float32)
+                # Vertical drip waves pulling glyph strokes downward
+                drip_amp = max(2.0, rh * 0.18 * intensity)
+                freq = rng.uniform(2.5, 5.0)
+                phase = rng.uniform(0, 6.28)
+                drip_offset = drip_amp * np.sin(melt_grid_x / max(1.0, rw) * np.pi * freq + phase)
+                drip_offset = np.clip(drip_offset, -2, drip_amp)
+                
+                # Weight drip so it affects bottom half of glyphs more than top (melting downward)
+                vert_weight = (melt_grid_y / max(1.0, rh)) ** 1.3
+                src_y = np.clip(melt_grid_y - drip_offset * vert_weight, 0, rh - 1).astype(np.float32)
+                src_x = melt_grid_x.copy()
+                
+                melted = cv2.remap(patch, src_x, src_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+                patch = cv2.addWeighted(patch, 0.30, melted, 0.70, 0)
 
             out[ry:ry+rh, rx:rx+rw] = patch
 
@@ -1376,98 +1403,84 @@ class MisrememberedEngine:
 
     def generate_green_light_cracks(self, w, h, progress, rng):
         """
-        Kane Pixels Green Light — Full-screen cracked-glass Voronoi polygon mesh.
-        Based on reference images: the entire screen washes emerald-green with
-        bright yellow-white polygon seam cracks covering the WHOLE frame surface,
-        like a cracked windshield lit from behind.
-
-        Returns an additive overlay (BGR). The caller is responsible for applying
-        the green tint to the base frame before adding this overlay.
+        Kane Pixels Green Light — Realistic jagged branching glass fractures & electric veins.
+        Generates realistic jagged fracture pathways originating from screen stress points
+        that branch outward like broken windshield glass or lightning fissures.
         """
         crack_rng = random.Random(rng.randint(0, 0xFFFFFF))
-
-        # ── Voronoi seed points scattered across full frame ──
-        # Denser near edges, looser in center — cracks originate from border stress
-        n_seeds = int(18 + 22 * progress)  # 18 at start, up to 40 at full progress
-        seeds = []
-
-        # Force several seeds at/near each edge to anchor the mesh to the borders
-        for _ in range(6):
-            seeds.append((crack_rng.randint(0, w - 1), crack_rng.randint(0, max(1, int(h * 0.15)))))
-        for _ in range(6):
-            seeds.append((crack_rng.randint(0, w - 1), crack_rng.randint(max(0, int(h * 0.85)), h - 1)))
-        for _ in range(5):
-            seeds.append((crack_rng.randint(0, max(1, int(w * 0.15))), crack_rng.randint(0, h - 1)))
-        for _ in range(5):
-            seeds.append((crack_rng.randint(max(0, int(w * 0.85)), w - 1), crack_rng.randint(0, h - 1)))
-        # Interior seeds
-        for _ in range(n_seeds):
-            seeds.append((crack_rng.randint(0, w - 1), crack_rng.randint(0, h - 1)))
-
-        seeds = np.array(seeds, dtype=np.float32)
-        n_pts = len(seeds)
-
-        # Build a fast Voronoi using OpenCV Subdiv2D
-        rect = (0, 0, w, h)
-        subdiv = cv2.Subdiv2D(rect)
-        for pt in seeds:
-            px, py = float(np.clip(pt[0], 1, w - 2)), float(np.clip(pt[1], 1, h - 2))
-            try:
-                subdiv.insert((px, py))
-            except Exception:
-                pass
-
-        # Get Voronoi facets
-        try:
-            facet_list, _ = subdiv.getVoronoiFacetList([])
-        except Exception:
-            facet_list = []
-
-        # ── Draw the cracked glass seams ──
         overlay = np.zeros((h, w, 3), dtype=np.uint8)
 
-        for facet in facet_list:
-            pts = np.array(facet, dtype=np.int32)
-            # Clip all points to frame bounds
-            pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
-            pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
+        # Number of main fracture trunks scaling with progress
+        num_trunks = int(4 + 8 * progress)
+        
+        # Origin stress points around screen borders and corners
+        origins = [
+            (0, crack_rng.randint(int(h * 0.2), int(h * 0.8))),
+            (w - 1, crack_rng.randint(int(h * 0.2), int(h * 0.8))),
+            (crack_rng.randint(int(w * 0.2), int(w * 0.8)), 0),
+            (crack_rng.randint(int(w * 0.2), int(w * 0.8)), h - 1),
+            (0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)
+        ]
 
-            # Only draw facets that are at least partially visible
-            if len(pts) < 3:
-                continue
+        def draw_jagged_branch(x0, y0, target_x, target_y, depth, cur_alpha):
+            if depth <= 0 or cur_alpha < 0.05:
+                return
+            
+            # Interpolate with high-frequency perpendicular random jitter
+            dist = np.hypot(target_x - x0, target_y - y0)
+            steps = max(3, int(dist / 18))
+            points = [(int(x0), int(y0))]
+            
+            curr_x, curr_y = float(x0), float(y0)
+            dx = (target_x - x0) / steps
+            dy = (target_y - y0) / steps
 
-            # Crack visibility: reveal progressively outward from edges as progress grows
-            # Facets near the border appear first; center facets appear later
-            facet_center_x = np.mean(pts[:, 0])
-            facet_center_y = np.mean(pts[:, 1])
-            dist_from_edge = min(
-                facet_center_x, w - facet_center_x,
-                facet_center_y, h - facet_center_y
-            ) / max(w, h)
-            reveal_threshold = dist_from_edge * 1.6  # edges reveal at progress~0, center at ~0.6
-            if progress < reveal_threshold:
-                continue
+            for s in range(1, steps + 1):
+                if s == steps:
+                    nx, ny = float(target_x), float(target_y)
+                else:
+                    jitter = (1.0 - (s / steps) * 0.3) * 16.0
+                    nx = curr_x + dx + crack_rng.uniform(-jitter, jitter)
+                    ny = curr_y + dy + crack_rng.uniform(-jitter, jitter)
+                
+                pt_curr = (int(np.clip(curr_x, 0, w - 1)), int(np.clip(curr_y, 0, h - 1)))
+                pt_next = (int(np.clip(nx, 0, w - 1)), int(np.clip(ny, 0, h - 1)))
+                
+                # Outer green glow
+                cv2.line(overlay, pt_curr, pt_next, (0, int(90 * cur_alpha), 0), 4, cv2.LINE_AA)
+                # Emerald vein
+                cv2.line(overlay, pt_curr, pt_next, (0, int(220 * cur_alpha), int(50 * cur_alpha)), 2, cv2.LINE_AA)
+                # Pure white-yellow core crack
+                cv2.line(overlay, pt_curr, pt_next, (int(160 * cur_alpha), int(255 * cur_alpha), int(200 * cur_alpha)), 1, cv2.LINE_AA)
 
-            local_alpha = min(1.0, (progress - reveal_threshold) / max(0.001, 0.3))
+                # Fork sub-branches
+                if depth > 1 and crack_rng.random() < 0.38:
+                    fork_angle = crack_rng.uniform(-0.9, 0.9)
+                    fork_len = dist * crack_rng.uniform(0.25, 0.55)
+                    fx = nx + np.cos(fork_angle) * fork_len
+                    fy = ny + np.sin(fork_angle) * fork_len
+                    draw_jagged_branch(nx, ny, fx, fy, depth - 1, cur_alpha * 0.75)
 
-            # Glow halo seam (thick dark green under-glow)
-            cv2.polylines(overlay, [pts], True, (0, int(80 * local_alpha), 0), 5, cv2.LINE_AA)
-            # Mid seam — vivid emerald
-            cv2.polylines(overlay, [pts], True, (0, int(200 * local_alpha), int(40 * local_alpha)), 2, cv2.LINE_AA)
-            # Hot bright seam — near-white yellow-green caustic highlight
-            cv2.polylines(overlay, [pts], True,
-                          (int(120 * local_alpha), int(255 * local_alpha), int(160 * local_alpha)), 1, cv2.LINE_AA)
+                curr_x, curr_y = nx, ny
 
-            # Small flare hotspot at each vertex of the polygon
-            for vx, vy in pts:
-                if crack_rng.random() < 0.35 * local_alpha:
-                    flare_r = crack_rng.randint(2, 5)
-                    flare_col = (
-                        int(80 * local_alpha),
-                        int(255 * local_alpha),
-                        int(200 * local_alpha)
-                    )
-                    cv2.circle(overlay, (int(vx), int(vy)), flare_r, flare_col, -1, cv2.LINE_AA)
+        # Draw main fracture trunks
+        for i in range(num_trunks):
+            orig_x, orig_y = crack_rng.choice(origins)
+            # Target random interior point
+            tx = crack_rng.randint(int(w * 0.15), int(w * 0.85))
+            ty = crack_rng.randint(int(h * 0.15), int(h * 0.85))
+            branch_alpha = min(1.0, progress * 1.3)
+            draw_jagged_branch(orig_x, orig_y, tx, ty, depth=3, cur_alpha=branch_alpha)
+
+        # Cross-fissure micro-cracks
+        if progress > 0.4:
+            n_micro = int(6 + 12 * progress)
+            for _ in range(n_micro):
+                mx0 = crack_rng.randint(0, w - 1)
+                my0 = crack_rng.randint(0, h - 1)
+                mx1 = mx0 + crack_rng.randint(-80, 80)
+                my1 = my0 + crack_rng.randint(-80, 80)
+                draw_jagged_branch(mx0, my0, mx1, my1, depth=1, cur_alpha=progress * 0.6)
 
         return overlay
 
@@ -1517,15 +1530,15 @@ class MisrememberedEngine:
         # ── 1. VISUAL INTERRUPT EVENTS (no_signal / no_video / static) ──
         if is_video and master_v > 0.30:
             cycle_time = t_sec % 18.0
-            # Sporadic 0.4s static snow burst
-            if 6.8 <= cycle_time < 7.2:
+            # Sporadic 0.5s static snow burst
+            if 6.8 <= cycle_time < 7.3:
                 return self.render_static_screen(w, h)
-            # Sporadic 0.8s No Signal event
-            elif 13.5 <= cycle_time < 14.3:
+            # Longer 1.8s No Signal event (12.8s - 14.6s)
+            elif 12.8 <= cycle_time < 14.6:
                 lang = NO_SIGNAL_LANGS[(self.seed + int(t_sec / 18.0)) % len(NO_SIGNAL_LANGS)]
                 return self.render_no_signal_screen(w, h, lang)
-            # Sporadic 0.5s No Video OSD
-            elif 17.5 <= cycle_time < 18.0:
+            # Sporadic 0.6s No Video OSD
+            elif 17.4 <= cycle_time < 18.0:
                 return self.render_no_video_screen(w, h)
 
         # ── 2. THE GREEN LIGHT EVENT (Full-screen green wash + Voronoi cracked-glass mesh) ──
@@ -1574,6 +1587,9 @@ class MisrememberedEngine:
         # visible frame-to-frame stuttering in video and are too
         # slow per-frame for reasonable export times.
         # ══════════════════════════════════════════════════════════
+        # ══════════════════════════════════════════════════════════
+        # PHOTO-ONLY EFFECTS — heavy DNN operations (YuNet)
+        # ══════════════════════════════════════════════════════════
         if not is_video:
             # ── FACE DISTORTION + YuNet detection (photo only) ──
             if still_v > 0.05:
@@ -1585,13 +1601,13 @@ class MisrememberedEngine:
                     out, rng, intensity=still_v * master_v * 0.90
                 )
 
-            # ── NON-EUCLIDEAN BACKGROUND WARP (photo only) ──
-            if still_v > 0.05:
-                out = NonEuclideanWarp.apply(out, rng, intensity=still_v * master_v * 0.75, t_sec=0.0)
+        # ══════════════════════════════════════════════════════════
+        # PHOTO + VIDEO EFFECTS (Smooth & Optimized)
+        # ══════════════════════════════════════════════════════════
 
-        # ══════════════════════════════════════════════════════════
-        # PHOTO + VIDEO EFFECTS
-        # ══════════════════════════════════════════════════════════
+        # ── NON-EUCLIDEAN BACKGROUND / OBJECT STRETCH (both) ──
+        if still_v > 0.05:
+            out = NonEuclideanWarp.apply(out, rng, intensity=still_v * master_v * 0.75, t_sec=t_sec)
 
         # ── STILL LIFE ANATOMICAL RECONSTRUCTION (fast skin blob — both) ──
         if self.use_still_life and still_v > 0.05:
