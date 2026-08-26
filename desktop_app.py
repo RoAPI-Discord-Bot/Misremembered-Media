@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.4.3-FULL-PIPELINE"
+APP_VERSION = "v4.4.4-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -521,14 +521,11 @@ INTERNATIONAL_PHRASES = [
 class LocalGlyphCorruptor:
     @staticmethod
     def generate_phonetic_mutation(word_len, rng):
-        # 35% chance to output an authentic international anomaly phrase
-        if rng.random() < 0.35:
-            return rng.choice(INTERNATIONAL_PHRASES)
-
-        vowels = ['a', 'e', 'i', 'o', 'u', 'ea', 'oe', 'ai']
-        consonants = ['b', 'c', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'v', 'w', 'sh', 'th', 'ch', 'bl', 'st', 'cl']
+        # Generate believable "slightly wrong" / uncanny pseudo-words rather than full foreign phrases
+        vowels = ['a', 'e', 'i', 'o', 'u', 'ea', 'oe', 'ai', 'y', 'ou', 'ee']
+        consonants = ['b', 'c', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'v', 'w', 'sh', 'th', 'ch', 'bl', 'st', 'cl', 'pr', 'tr']
         res = []
-        is_vow = rng.random() < 0.3
+        is_vow = rng.random() < 0.35
         while len("".join(res)) < word_len:
             if is_vow:
                 res.append(rng.choice(vowels))
@@ -536,7 +533,7 @@ class LocalGlyphCorruptor:
                 res.append(rng.choice(consonants))
             is_vow = not is_vow
         out = "".join(res)[:word_len]
-        return out.capitalize() if rng.random() < 0.4 else out
+        return out.capitalize() if rng.random() < 0.25 else out
 
     @staticmethod
     def corrupt_actual_frame_text(bgr_img, rng, intensity=0.85, frame_idx=0, fps=30.0):
@@ -1325,18 +1322,16 @@ class NoclippingEffect:
     @staticmethod
     def apply(bgr_img, rng, intensity=0.80):
         """Sporadic black-static tears on floor/ceiling geometry — noclip glitch."""
-        if intensity < 0.05 or rng.random() > intensity * 0.22:
+        if intensity < 0.05 or rng.random() > intensity * 0.12:
             return bgr_img
 
         h, w = bgr_img.shape[:2]
         out = bgr_img.copy()
         planes = NoclippingEffect._floor_planes(bgr_img)
 
+        # Only fire if we genuinely detected a floor/ceiling plane — no unconditional fallback
         if not planes:
-            # Fallback: random strip in lower frame
-            sy = rng.randint(int(h * 0.55), int(h * 0.88))
-            sh = rng.randint(int(h * 0.04), int(h * 0.14))
-            planes = [(sy, min(h, sy + sh))]
+            return bgr_img
 
         for (y0, y1) in planes:
             if y1 <= y0:
