@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.4.1-FULL-PIPELINE"
+APP_VERSION = "v4.4.2-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -573,21 +573,13 @@ class LocalGlyphCorruptor:
         if not text_boxes:
             return bgr_img
 
-        # ── STEP 1 & 2: Clean background locally and render replacement text ──
-        # Instead of running expensive full-frame cv2.inpaint on 1080p/4K frames (which destroys FPS),
-        # we inpaint ONLY the local bounding boxes + margin directly on the canvas!
+        # ── STEP 1: Fully clean and inpaint ALL detected text regions on base image ──
         out = bgr_img.copy()
-        pil_img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(pil_img)
+        box_data = []
 
-        font_candidates = ["arial.ttf", "arialbd.ttf", "calibri.ttf", "verdana.ttf",
-                           "times.ttf", "trebuc.ttf"]
-
-        # Vectorized/direct drawing on PIL image
-        for (bx, by, bw, bh) in text_boxes[:6]:
-            # Crop local region with margins to perform ultra-fast localized inpaint
-            px = max(4, int(bw * 0.10))
-            py = max(6, int(bh * 0.45))
+        for (bx, by, bw, bh) in text_boxes[:8]:
+            px = max(4, int(bw * 0.12))
+            py = max(6, int(bh * 0.50))
             rx = max(0, bx - px);      ry = max(0, by - py)
             rw = min(w - rx, bw + px * 2); rh = min(h - ry, bh + py * 2)
 
@@ -595,26 +587,34 @@ class LocalGlyphCorruptor:
             if local_patch.size == 0:
                 continue
 
-            # Local mask for this specific box
+            # Accurate local mask targeting the text area inside the patch
             loc_mask = np.zeros((rh, rw), dtype=np.uint8)
             lx0 = max(0, bx - rx); ly0 = max(0, by - ry)
             lx1 = min(rw, bx + bw - rx); ly1 = min(rh, by + bh - ry)
             loc_mask[ly0:ly1, lx0:lx1] = 255
-            loc_mask = cv2.dilate(loc_mask, np.ones((5, 5), np.uint8))
+            loc_mask = cv2.dilate(loc_mask, np.ones((7, 7), np.uint8))
 
-            # Ultra fast local inpaint
-            local_clean = cv2.inpaint(local_patch, loc_mask, 4, cv2.INPAINT_TELEA)
+            # Inpaint local area
+            local_clean = cv2.inpaint(local_patch, loc_mask, 5, cv2.INPAINT_TELEA)
             out[ry:ry+rh, rx:rx+rw] = local_clean
 
-            # Sample the local background colour
             bg_brightness = float(np.mean(local_clean))
             is_light_bg   = bg_brightness > 128
+            box_data.append((bx, by, bw, bh, rx, ry, rw, rh, is_light_bg))
 
+        # ── STEP 2: Render corrupted replacement text on the clean background ──
+        pil_img = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+
+        font_candidates = ["arial.ttf", "arialbd.ttf", "calibri.ttf", "verdana.ttf",
+                           "times.ttf", "trebuc.ttf"]
+
+        for (bx, by, bw, bh, rx, ry, rw, rh, is_light_bg) in box_data:
             # Text colour: contrast against local background
             if is_light_bg:
-                fg = (rng.randint(0, 40), rng.randint(0, 40), rng.randint(0, 40))
+                fg = (rng.randint(0, 30), rng.randint(0, 30), rng.randint(0, 30))
             else:
-                fg = (rng.randint(210, 255), rng.randint(210, 255), rng.randint(210, 255))
+                fg = (rng.randint(220, 255), rng.randint(220, 255), rng.randint(220, 255))
 
             # Estimate word count from bbox width/height ratio
             est_words = max(1, int(bw / max(1, bh * 4.5)))
@@ -633,10 +633,6 @@ class LocalGlyphCorruptor:
             if font is None:
                 font = ImageFont.load_default()
 
-            # Paste cleaned patch onto PIL image
-            local_clean_rgb = cv2.cvtColor(local_clean, cv2.COLOR_BGR2RGB)
-            pil_img.paste(Image.fromarray(local_clean_rgb), (rx, ry))
-
             # Position: within the original bbox, slight random offset
             tx = bx + rng.randint(0, max(1, int(bw * 0.04)))
             ty = by + max(0, int((bh - f_size) / 2)) + rng.randint(-2, 2)
@@ -645,10 +641,7 @@ class LocalGlyphCorruptor:
         # ── STEP 3: Apply ghost + strip distortions to each replacement region ──
         out = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
-        for (bx, by, bw, bh) in text_boxes[:6]:
-            px = max(4, int(bw * 0.10)); py = max(6, int(bh * 0.45))
-            rx = max(0, bx - px); ry = max(0, by - py)
-            rw = min(w - rx, bw + px * 2); rh = min(h - ry, bh + py * 2)
+        for (bx, by, bw, bh, rx, ry, rw, rh, _) in box_data:
             patch = out[ry:ry+rh, rx:rx+rw].copy()
             if patch.size == 0:
                 continue
