@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.4.0-FULL-PIPELINE"
+APP_VERSION = "v4.4.1-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -464,12 +464,10 @@ class KanePixelsAudioDSP:
         if not emg_path or not os.path.exists(emg_path):
             dbg(f"EMG audio file not found: {emg_path}", "AUDIO")
             return None
-        if not ffmpeg or not os.path.exists(ffmpeg):
-            dbg("FFmpeg not available — cannot decode EMG MP3", "AUDIO")
-            return None
+        ff_bin = ffmpeg or "ffmpeg"
         try:
             tmp = os.path.join(tempfile.gettempdir(), f"_emg_decoded_{int(time.time())}.wav")
-            cmd = [ffmpeg, "-y", "-i", emg_path, "-vn", "-ac", "2", "-ar", str(sr), tmp]
+            cmd = [ff_bin, "-y", "-i", emg_path, "-vn", "-ac", "2", "-ar", str(sr), tmp]
             subprocess.run(cmd, capture_output=True, timeout=30)
             if not os.path.exists(tmp) or os.path.getsize(tmp) < 500:
                 dbg("EMG decode produced no output", "AUDIO")
@@ -585,7 +583,8 @@ class LocalGlyphCorruptor:
         font_candidates = ["arial.ttf", "arialbd.ttf", "calibri.ttf", "verdana.ttf",
                            "times.ttf", "trebuc.ttf"]
 
-        for (bx, by, bw, bh) in text_boxes[:8]:
+        # Vectorized/direct drawing on PIL image
+        for (bx, by, bw, bh) in text_boxes[:6]:
             # Crop local region with margins to perform ultra-fast localized inpaint
             px = max(4, int(bw * 0.10))
             py = max(6, int(bh * 0.45))
@@ -603,13 +602,9 @@ class LocalGlyphCorruptor:
             loc_mask[ly0:ly1, lx0:lx1] = 255
             loc_mask = cv2.dilate(loc_mask, np.ones((5, 5), np.uint8))
 
-            # Ultra fast local inpaint (tiny sub-rectangle only)
-            local_clean = cv2.inpaint(local_patch, loc_mask, 5, cv2.INPAINT_TELEA)
+            # Ultra fast local inpaint
+            local_clean = cv2.inpaint(local_patch, loc_mask, 4, cv2.INPAINT_TELEA)
             out[ry:ry+rh, rx:rx+rw] = local_clean
-
-            # Update PIL image slice
-            local_clean_rgb = cv2.cvtColor(local_clean, cv2.COLOR_BGR2RGB)
-            pil_img.paste(Image.fromarray(local_clean_rgb), (rx, ry))
 
             # Sample the local background colour
             bg_brightness = float(np.mean(local_clean))
@@ -638,6 +633,10 @@ class LocalGlyphCorruptor:
             if font is None:
                 font = ImageFont.load_default()
 
+            # Paste cleaned patch onto PIL image
+            local_clean_rgb = cv2.cvtColor(local_clean, cv2.COLOR_BGR2RGB)
+            pil_img.paste(Image.fromarray(local_clean_rgb), (rx, ry))
+
             # Position: within the original bbox, slight random offset
             tx = bx + rng.randint(0, max(1, int(bw * 0.04)))
             ty = by + max(0, int((bh - f_size) / 2)) + rng.randint(-2, 2)
@@ -646,7 +645,7 @@ class LocalGlyphCorruptor:
         # ── STEP 3: Apply ghost + strip distortions to each replacement region ──
         out = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
-        for (bx, by, bw, bh) in text_boxes[:8]:
+        for (bx, by, bw, bh) in text_boxes[:6]:
             px = max(4, int(bw * 0.10)); py = max(6, int(bh * 0.45))
             rx = max(0, bx - px); ry = max(0, by - py)
             rw = min(w - rx, bw + px * 2); rh = min(h - ry, bh + py * 2)
