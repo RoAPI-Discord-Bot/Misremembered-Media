@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.5.2-FULL-PIPELINE"
+APP_VERSION = "v4.5.3-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -453,7 +453,10 @@ class KanePixelsAudioDSP:
                         env = np.ones(seg_len, dtype=np.float32)
                         env[:fade_len] = np.linspace(0, 1, fade_len)
                         env[-fade_len:] = np.linspace(1, 0, fade_len)
-                        mixed[idx0:idx1] += ns_audio[:seg_len] * env[:, np.newaxis]
+                        
+                        # Completely pause / mute base video audio during EMG playback
+                        duck_mask = (1.0 - env)[:, np.newaxis]
+                        mixed[idx0:idx1] = mixed[idx0:idx1] * duck_mask + ns_audio[:seg_len] * env[:, np.newaxis]
                 t_sec += cycle_time
 
         # 8. Camcorder AGC & soft saturation limiter
