@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.5.1-FULL-PIPELINE"
+APP_VERSION = "v4.5.2-FULL-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTERNAL DEBUG TERMINAL
@@ -1634,10 +1634,6 @@ class MisrememberedEngine:
             out = LocalGlyphCorruptor.corrupt_actual_frame_text(
                 out, rng, intensity=text_v * master_v, frame_idx=frame_idx, fps=fps
             )
-
-        # ── "NOCLIPPING" FLOOR / CEILING TEARS (video only — time-based) ──
-        if master_v > 0.30 and is_video:
-            out = NoclippingEffect.apply(out, rng, intensity=master_v * still_v)
 
         return out
 
