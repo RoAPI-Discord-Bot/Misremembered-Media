@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.5-ASYNC-DIFFUSION-PIPELINE"
+APP_VERSION = "v4.6.6-PURE-AI-MODE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -1484,6 +1484,14 @@ class BackroomsDiffusionEngine:
                 if device == "cuda":
                     pipe = pipe.to("cuda")
                     pipe.enable_attention_slicing()
+                    try:
+                        pipe.enable_xformers_memory_efficient_attention()
+                    except Exception:
+                        pass
+                else:
+                    # Optimize CPU inference threads for multi-core performance
+                    import torch
+                    torch.set_num_threads(max(4, os.cpu_count() or 8))
 
                 if os.path.exists(lora_path):
                     if progress_cb:
@@ -1509,7 +1517,7 @@ class BackroomsDiffusionEngine:
                 cls._is_loading = False
 
     @classmethod
-    def reconstruct_frame(cls, bgr_img, strength=0.54, guidance_scale=7.5, lora_scale=0.88, steps=20, prompt=None, neg_prompt=None):
+    def reconstruct_frame(cls, bgr_img, strength=0.55, guidance_scale=7.5, lora_scale=0.88, steps=15, prompt=None, neg_prompt=None):
         if cls._pipe is None:
             cls.load_pipeline()
 
@@ -1521,28 +1529,23 @@ class BackroomsDiffusionEngine:
         rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
         pil_init = Image.fromarray(rgb)
 
-        # Scale maintaining aspect ratio, capped at 768px for fast inference
-        MAX_DIM = 768
+        # Scale maintaining aspect ratio, capped at 512px for maximum speed and fidelity match
+        MAX_DIM = 512
         scale = min(1.0, MAX_DIM / max(w, h))
         target_w = max(64, int(round(w * scale / 64) * 64))
         target_h = max(64, int(round(h * scale / 64) * 64))
         init_sd = pil_init.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
+        # Concise 45-token prompt strictly within CLIP 77-token limit to ensure full attention weight on Backrooms style
         p = prompt or (
-            "anomalous 3D meme and room inside the complex, "
-            "corrupted mutated text, duplicated instanced letters and misspelled wrong words, "
-            "blurry smeared glyphs, misplaced letters trailing off, "
-            "a frozen still life human figure standing in the room, "
-            "physical anatomical still life sculpture with misplaced limbs and eyes, "
-            "floating trees, instanced duplicated furniture placed in wrong locations, "
-            "office chairs and tables severed and clipped halfway into the floor and walls, "
-            "broken physical geometry, backrooms-complex style"
+            "backrooms-complex style, liminal space, instanced cloned furniture, "
+            "severed items clipped into floor and walls, still life sculpture, "
+            "distorted misspelled words and blurred trailing letters, 3d physical space"
         )
 
         np_prompt = neg_prompt or (
-            "perfect clean readable text, crisp typography, correctly spelled words, "
-            "painted illustration, painting, brush strokes, watercolor, 2d drawing, cartoon, "
-            "flat shading, smooth clay smear, white haze, overexposed, washed out colors"
+            "readable text, clean typography, correct spelling, "
+            "painting, 2d drawing, cartoon, flat clay smear, white haze, blurry canvas"
         )
 
         with torch.inference_mode():
@@ -2049,11 +2052,20 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.diff_status_lbl = ctk.CTkLabel(load_frame, text="STATUS: Model not loaded in VRAM (Click above)", font=ctk.CTkFont(family="Courier New", size=9), text_color="#9ca3af")
         self.diff_status_lbl.pack(anchor="w", padx=8, pady=(0, 6))
 
+        # Single button to unapply all other procedural distortions & run pure AI diffusion
+        self.pure_ai_btn = ctk.CTkButton(
+            self.tab_diffusion, text="✨ PURE AI MODE (ZERO OTHER EFFECTS)",
+            font=ctk.CTkFont(family="Courier New", size=10, weight="bold"),
+            fg_color="#181a20", hover_color="#262a36", border_width=1, border_color="#ff3344", text_color="#ff3344",
+            height=28, command=self.reset_other_effects_for_ai
+        )
+        self.pure_ai_btn.pack(fill="x", padx=2, pady=(0, 6))
+
         diff_sliders = [
-            ("Diffusion Img2Img Strength", "diff_strength", 10, 90, 54, "#ff3344"),
-            ("LoRA Weight Scale", "diff_lora_scale", 10, 100, 85, "#00ff66"),
+            ("Diffusion Img2Img Strength", "diff_strength", 10, 90, 55, "#ff3344"),
+            ("LoRA Weight Scale", "diff_lora_scale", 10, 100, 88, "#00ff66"),
             ("Guidance Scale (CFG)", "diff_guidance", 30, 150, 75, "#ff3344"),
-            ("Inference Steps (EulerA)", "diff_steps", 10, 50, 20, "#00ff66"),
+            ("Inference Steps (EulerA)", "diff_steps", 10, 50, 15, "#00ff66"),
         ]
         for title, key, mn, mx, df, clr in diff_sliders:
             self._make_slider_group(self.tab_diffusion, title, key, mn, mx, df, clr)
@@ -2101,6 +2113,38 @@ class MisrememberedDesktopApp(ctk.CTk):
         except Exception:
             pass
         self.after(2000, self._update_telemetry_loop)
+
+    def reset_other_effects_for_ai(self):
+        """Zeroes out all procedural pixel distortions so the model's pure latent output is displayed."""
+        if hasattr(self, 'still_life_switch'):
+            self.still_life_switch.deselect()
+            self.engine.use_still_life = False
+
+        # Set procedural sliders to 0%
+        procedural_keys = ["object_melt", "flesh_gloss", "master_val", "green_shift", "poster_melt"]
+        for k in procedural_keys:
+            if k in self.slider_vars:
+                self.slider_vars[k].set(0)
+
+        # Ensure AI Diffusion is enabled
+        if hasattr(self, 'diffusion_switch'):
+            self.diffusion_switch.select()
+
+        # Set optimal Backrooms Diffusion parameters (matching Google Colab training settings)
+        if "diff_strength" in self.slider_vars:
+            self.slider_vars["diff_strength"].set(55)
+        if "diff_lora_scale" in self.slider_vars:
+            self.slider_vars["diff_lora_scale"].set(88)
+        if "diff_guidance" in self.slider_vars:
+            self.slider_vars["diff_guidance"].set(75)
+        if "diff_steps" in self.slider_vars:
+            self.slider_vars["diff_steps"].set(15)
+
+        self.add_log("Pure AI Mode Activated: Zeroed out procedural filters, running pure neural diffusion.", "alert")
+        if BackroomsDiffusionEngine._pipe is None and not BackroomsDiffusionEngine._is_loading:
+            self.load_diffusion_model_btn_click()
+        else:
+            self.refresh_preview()
 
     def toggle_diffusion(self):
         use_diff = self.diffusion_switch.get() == 1
