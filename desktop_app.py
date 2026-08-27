@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.4-DIFFUSION-FIXES"
+APP_VERSION = "v4.6.5-ASYNC-DIFFUSION-PIPELINE"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -2218,10 +2218,33 @@ class MisrememberedDesktopApp(ctk.CTk):
 
     def refresh_preview(self):
         if self.original_image_bgr is not None:
-            rng = random.Random(self.engine.seed)
+            # Run image processing in background worker so UI never freezes
+            threading.Thread(target=self._async_refresh_image_preview, daemon=True).start()
+
+    def _async_refresh_image_preview(self):
+        try:
+            self.status_lbl.configure(text="PROCESSING PREVIEW...", text_color="#ffcc00")
             sliders = self.get_sliders()
-            self.processed_image_bgr = self.engine.process_frame(self.original_image_bgr, rng, sliders, frame_idx=0, fps=0)
-            self._show_processed(self.processed_image_bgr)
+            is_diff = sliders.get("use_diffusion", 0) == 1
+            if is_diff:
+                self.progress_bar.set(0.3)
+                self.progress_bar.pack(side="bottom", fill="x")
+
+            rng = random.Random(self.engine.seed)
+            out = self.engine.process_frame(self.original_image_bgr, rng, sliders, frame_idx=0, fps=0)
+            self.processed_image_bgr = out
+
+            self.after(0, lambda: (
+                self._show_processed(out),
+                self.status_lbl.configure(text="PREVIEW READY", text_color="#00ff66"),
+                self.progress_bar.pack_forget() if is_diff else None
+            ))
+        except Exception as e:
+            dbg(f"Error in preview processing: {e}", "ERROR")
+            self.after(0, lambda: (
+                self.status_lbl.configure(text="PREVIEW ERROR", text_color="#ff3344"),
+                self.progress_bar.pack_forget()
+            ))
 
     def _show_original(self, bgr_img):
         try:
@@ -2257,8 +2280,14 @@ class MisrememberedDesktopApp(ctk.CTk):
                 continue
 
             sliders = self.get_sliders()
+            # For live interactive preview, don't run heavy per-frame diffusion on 30 FPS video playback to avoid lag;
+            # Full AI diffusion runs with 24 FPS downsampling in Export!
+            preview_sliders = sliders.copy()
+            if preview_sliders.get("use_diffusion", 0) == 1:
+                preview_sliders["use_diffusion"] = 0
+
             frame_rng = random.Random(self.engine.seed + int(frame_idx / (fps * 2.0)))
-            out = self.engine.process_frame(frame, frame_rng, sliders, frame_idx, fps)
+            out = self.engine.process_frame(frame, frame_rng, preview_sliders, frame_idx, fps)
             
             self._show_original(frame)
             self._show_processed(out)
@@ -2278,10 +2307,20 @@ class MisrememberedDesktopApp(ctk.CTk):
                 filetypes=[("PNG Image", "*.png"), ("JPEG Image", "*.jpg"), ("WEBP Image", "*.webp")],
                 initialfile=f"ꓫ_MISREMEMBERED_{os.path.basename(self.current_media_path)}"
             )
-            if out_path and self.processed_image_bgr is not None:
-                cv2.imwrite(out_path, self.processed_image_bgr)
-                self.add_log(f"Saved reconstructed image to: {out_path}", "info")
-                messagebox.showinfo("Export Complete", f"Saved reconstructed image to:\n{out_path}")
+            if not out_path:
+                return
+
+            self.is_processing = True
+            self.export_btn.configure(state="disabled")
+            self.progress_bar.set(0.1)
+            self.progress_bar.pack(side="bottom", fill="x")
+            self.add_log(f"Exporting reconstructed image to: {os.path.basename(out_path)}...", "alert")
+
+            threading.Thread(
+                target=self._async_export_image,
+                args=(out_path, self.get_sliders(), self.engine.seed),
+                daemon=True
+            ).start()
             return
 
         self.is_processing = True
@@ -2303,6 +2342,31 @@ class MisrememberedDesktopApp(ctk.CTk):
             daemon=True
         ).start()
 
+    def _async_export_image(self, out_path, sliders, seed):
+        try:
+            self.progress_bar.set(0.4)
+            rng = random.Random(seed)
+            res = self.engine.process_frame(self.original_image_bgr, rng, sliders, frame_idx=0, fps=0)
+            self.progress_bar.set(0.9)
+            cv2.imwrite(out_path, res)
+            self.processed_image_bgr = res
+            self.after(0, lambda: (
+                self._show_processed(res),
+                self.progress_bar.set(1.0),
+                self.add_log(f"Image Export Complete: {os.path.basename(out_path)}", "info"),
+                self.progress_bar.pack_forget(),
+                self.export_btn.configure(state="normal"),
+                messagebox.showinfo("Export Complete", f"Saved reconstructed image to:\n{out_path}")
+            ))
+        except Exception as e:
+            self.after(0, lambda err=str(e): (
+                self.add_log(f"Image export error: {err}", "warn"),
+                self.progress_bar.pack_forget(),
+                self.export_btn.configure(state="normal")
+            ))
+        finally:
+            self.is_processing = False
+
     def export_video_thread(self, sliders, use_still_life, seed, in_path):
         temp_video = None
         temp_in_wav = None
@@ -2315,6 +2379,8 @@ class MisrememberedDesktopApp(ctk.CTk):
             temp_in_wav = os.path.join(tempfile.gettempdir(), f"_temp_in_{int(time.time())}.wav")
             temp_out_wav = os.path.join(tempfile.gettempdir(), f"_temp_out_{int(time.time())}.wav")
 
+            cap = cv2.VideoCapture(in_path)
+            raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             is_diffusion = (sliders.get("use_diffusion", 0) == 1) and BackroomsDiffusionEngine.is_available()
 
             # Dynamic FPS Target: 24 FPS when AI diffusion is on to avoid overloading GPU/VRAM, 30 FPS otherwise
