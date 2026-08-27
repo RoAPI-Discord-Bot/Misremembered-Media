@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.3-DIFFUSION-FIXES"
+APP_VERSION = "v4.6.4-DIFFUSION-FIXES"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -1457,6 +1457,7 @@ class BackroomsDiffusionEngine:
                         lora_path = cand[0]
 
                 device = "cuda" if torch.cuda.is_available() else "cpu"
+                dtype = torch.float16 if device == "cuda" else torch.float32
                 token_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hf_token.txt")
                 hf_token = os.environ.get("HF_TOKEN")
                 if not hf_token and os.path.exists(token_file):
