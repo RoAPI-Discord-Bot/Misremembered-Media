@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.1-AI-DIFFUSION-VIDEO"
+APP_VERSION = "v4.6.2-ON-DEMAND-DIFFUSION"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -2006,18 +2006,29 @@ class MisrememberedDesktopApp(ctk.CTk):
 
         # ── AI DIFFUSION TAB (EXPERIMENTAL SD 1.5 + LORA) ──
         diff_switch_frame = ctk.CTkFrame(self.tab_diffusion, fg_color="#181c26", corner_radius=6, border_width=1, border_color="#2b3242")
-        diff_switch_frame.pack(fill="x", pady=(2, 8), padx=2)
+        diff_switch_frame.pack(fill="x", pady=(2, 6), padx=2)
 
         self.diffusion_switch = ctk.CTkSwitch(
             diff_switch_frame, text="EXPERIMENTAL AI DIFFUSION", font=ctk.CTkFont(family="Courier New", size=12, weight="bold"),
             progress_color="#00ff66", button_color="#ffffff", text_color="#00ff66",
             command=self.toggle_diffusion
         )
-        self.diffusion_switch.pack(side="top", anchor="w", padx=10, pady=(8, 4))
-        ctk.CTkLabel(diff_switch_frame, text="misremembered-diffusion-1.5 LoRA model", font=ctk.CTkFont(family="Courier New", size=9), text_color="#9ca3af").pack(side="top", anchor="w", padx=10, pady=(0, 8))
+        self.diffusion_switch.pack(side="top", anchor="w", padx=10, pady=(8, 2))
+        ctk.CTkLabel(diff_switch_frame, text="misremembered-diffusion-1.5 LoRA model", font=ctk.CTkFont(family="Courier New", size=9), text_color="#9ca3af").pack(side="top", anchor="w", padx=10, pady=(0, 6))
 
-        self.diff_status_lbl = ctk.CTkLabel(self.tab_diffusion, text="MODEL: C:\\Users\\...\\misremembered-diffusion-1.5", font=ctk.CTkFont(family="Courier New", size=9), text_color="#6b7280")
-        self.diff_status_lbl.pack(anchor="w", padx=4, pady=(0, 4))
+        # Explicit Load Model Action Frame
+        load_frame = ctk.CTkFrame(self.tab_diffusion, fg_color="#13161f", corner_radius=6, border_width=1, border_color="#1f2432")
+        load_frame.pack(fill="x", pady=(0, 6), padx=2)
+
+        self.load_model_btn = ctk.CTkButton(
+            load_frame, text="⚡ LOAD MODEL INTO VRAM", font=ctk.CTkFont(family="Courier New", size=11, weight="bold"),
+            fg_color="#1f2430", hover_color="#2b3242", border_width=1, border_color="#00ff66", text_color="#00ff66",
+            height=30, command=self.load_diffusion_model_btn_click
+        )
+        self.load_model_btn.pack(fill="x", padx=8, pady=(6, 4))
+
+        self.diff_status_lbl = ctk.CTkLabel(load_frame, text="STATUS: Model not loaded in VRAM (Click above)", font=ctk.CTkFont(family="Courier New", size=9), text_color="#9ca3af")
+        self.diff_status_lbl.pack(anchor="w", padx=8, pady=(0, 6))
 
         diff_sliders = [
             ("Diffusion Img2Img Strength", "diff_strength", 10, 90, 54, "#ff3344"),
@@ -2084,20 +2095,55 @@ class MisrememberedDesktopApp(ctk.CTk):
                 self.diffusion_switch.deselect()
                 return
 
-            self.add_log("Loading experimental Backrooms Diffusion 1.5 pipeline...", "alert")
-            threading.Thread(target=self._async_load_diffusion, daemon=True).start()
+            if BackroomsDiffusionEngine._pipe is None and not BackroomsDiffusionEngine._is_loading:
+                self.load_diffusion_model_btn_click()
+            else:
+                self.add_log("AI Diffusion Engine enabled for reconstruction.", "info")
+                self.refresh_preview()
         else:
             self.add_log("AI Diffusion Engine disabled. Reverting to real-time procedural engine.", "info")
             self.refresh_preview()
+
+    def load_diffusion_model_btn_click(self):
+        if not BackroomsDiffusionEngine.is_available():
+            messagebox.showwarning(
+                "PyTorch / Diffusers Required",
+                "The experimental AI Diffusion engine requires 'torch' and 'diffusers'.\n\n"
+                "Install with: pip install torch torchvision diffusers transformers accelerate safetensors"
+            )
+            return
+
+        if BackroomsDiffusionEngine._is_loading:
+            self.add_log("Model is already loading in the background, please wait...", "warn")
+            return
+
+        if BackroomsDiffusionEngine._pipe is not None:
+            self.add_log("Model is already loaded and ready in VRAM/RAM!", "info")
+            self.diff_status_lbl.configure(text="STATUS: ● Model Active & Loaded in VRAM", text_color="#00ff66")
+            return
+
+        self.load_model_btn.configure(state="disabled", text="⏳ LOADING MODEL...")
+        self.diff_status_lbl.configure(text="STATUS: ⏳ Initializing PyTorch & loading LoRA...", text_color="#ffcc00")
+        self.add_log("Starting on-demand load of misremembered-diffusion-1.5...", "alert")
+        threading.Thread(target=self._async_load_diffusion, daemon=True).start()
 
     def _async_load_diffusion(self):
         try:
             BackroomsDiffusionEngine.load_pipeline(progress_cb=lambda m: self.add_log(m, "info"))
             self.add_log("AI Diffusion Pipeline Ready in VRAM/RAM!", "info")
-            self.after(100, self.refresh_preview)
+            self.after(0, lambda: (
+                self.load_model_btn.configure(state="normal", text="✓ MODEL LOADED (CLICK TO RE-CHECK)"),
+                self.diff_status_lbl.configure(text="STATUS: ● Model Active & Loaded in VRAM", text_color="#00ff66"),
+                self.diffusion_switch.select(),
+                self.refresh_preview()
+            ))
         except Exception as e:
             self.add_log(f"Diffusion load error: {e}", "warn")
-            self.after(100, self.diffusion_switch.deselect)
+            self.after(0, lambda: (
+                self.load_model_btn.configure(state="normal", text="⚡ LOAD MODEL INTO VRAM"),
+                self.diff_status_lbl.configure(text=f"ERROR: {e}", text_color="#ff3344"),
+                self.diffusion_switch.deselect()
+            ))
 
     def toggle_still_life(self):
         self.engine.use_still_life = self.still_life_switch.get() == 1
