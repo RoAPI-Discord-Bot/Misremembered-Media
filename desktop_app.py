@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.8-CPU-SPEED-OPTIMIZED"
+APP_VERSION = "v4.6.9-INTEL-ARC-SUPPORT"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -48,7 +48,7 @@ def get_system_memory_status():
     except Exception:
         pass
 
-    vram_str = "VRAM: N/A"
+    vram_str = "GPU: CPU MODE"
     try:
         import torch
         if torch.cuda.is_available():
@@ -57,8 +57,15 @@ def get_system_memory_status():
             v_total = round(torch.cuda.get_device_properties(dev).total_memory / (1024 ** 3), 1)
             v_alloc = round(torch.cuda.memory_allocated(dev) / (1024 ** 3), 1)
             vram_str = f"GPU: {dev_name} [{v_alloc}/{v_total}GB]"
+        elif hasattr(torch, "xpu") and torch.xpu.is_available():
+            dev_name = torch.xpu.get_device_name(0)
+            vram_str = f"INTEL ARC: {dev_name} (XPU)"
         else:
-            vram_str = "GPU: CPU MODE"
+            try:
+                import torch_directml
+                vram_str = f"GPU: DIRECTML (INTEL ARC)"
+            except Exception:
+                vram_str = "INTEL ARC DETECTED (CPU FALLBACK)"
     except Exception:
         pass
 
@@ -1456,8 +1463,26 @@ class BackroomsDiffusionEngine:
                     if cand:
                         lora_path = cand[0]
 
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                dtype = torch.float16 if device == "cuda" else torch.float32
+                device_type = "cpu"
+                dml_device = None
+                dtype = torch.float32
+
+                if torch.cuda.is_available():
+                    device_type = "cuda"
+                    dtype = torch.float16
+                elif hasattr(torch, "xpu") and torch.xpu.is_available():
+                    device_type = "xpu"
+                    dtype = torch.float16
+                else:
+                    try:
+                        import torch_directml
+                        dml_device = torch_directml.device()
+                        device_type = "dml"
+                        dtype = torch.float32 # DirectML uses FP32 for robust Windows GPU compute
+                    except Exception:
+                        device_type = "cpu"
+                        dtype = torch.float32
+
                 token_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hf_token.txt")
                 hf_token = os.environ.get("HF_TOKEN")
                 if not hf_token and os.path.exists(token_file):
@@ -1469,9 +1494,10 @@ class BackroomsDiffusionEngine:
                     os.environ["HF_TOKEN"] = hf_token
                 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
+                dev_display = f"DirectML (Intel Arc 140V)" if device_type == "dml" else (device_type.upper())
                 if progress_cb:
-                    progress_cb("Loading base SD 1.5 pipeline...")
-                dbg(f"Loading Base SD 1.5 on {device} ({dtype})...", "AI_DIFF")
+                    progress_cb(f"Loading Base SD 1.5 on {dev_display}...")
+                dbg(f"Loading Base SD 1.5 on {dev_display} ({dtype})...", "AI_DIFF")
 
                 pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
                     "runwayml/stable-diffusion-v1-5",
@@ -1482,13 +1508,18 @@ class BackroomsDiffusionEngine:
                 # DPMSolverMultistepScheduler provides convergence in only 8-12 steps instead of 20-30 steps
                 pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True)
 
-                if device == "cuda":
+                if device_type == "cuda":
                     pipe = pipe.to("cuda")
                     pipe.enable_attention_slicing()
                     try:
                         pipe.enable_xformers_memory_efficient_attention()
                     except Exception:
                         pass
+                elif device_type == "xpu":
+                    pipe = pipe.to("xpu")
+                elif device_type == "dml" and dml_device is not None:
+                    pipe = pipe.to(dml_device)
+                    dbg("Pipeline moved to Intel Arc GPU via DirectML!", "AI_DIFF")
                 else:
                     # Optimize CPU inference threads for multi-core performance
                     import torch
