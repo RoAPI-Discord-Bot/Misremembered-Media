@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.0-AI-DIFFUSION"
+APP_VERSION = "v4.6.1-AI-DIFFUSION-VIDEO"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -2249,19 +2249,21 @@ class MisrememberedDesktopApp(ctk.CTk):
             temp_in_wav = os.path.join(tempfile.gettempdir(), f"_temp_in_{int(time.time())}.wav")
             temp_out_wav = os.path.join(tempfile.gettempdir(), f"_temp_out_{int(time.time())}.wav")
 
-            cap = cv2.VideoCapture(in_path)
-            raw_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            # Cap export FPS to 30.0 max — 60 FPS doubles processing time for no aesthetic benefit
-            fps = min(30.0, raw_fps)
-            frame_step = max(1, int(round(raw_fps / fps))) if raw_fps > 35.0 else 1
+            is_diffusion = (sliders.get("use_diffusion", 0) == 1) and BackroomsDiffusionEngine.is_available()
+
+            # Dynamic FPS Target: 24 FPS when AI diffusion is on to avoid overloading GPU/VRAM, 30 FPS otherwise
+            target_fps_cap = 24.0 if is_diffusion else 30.0
+            fps = min(target_fps_cap, raw_fps)
+            frame_step = max(1, int(round(raw_fps / fps))) if raw_fps > (target_fps_cap + 4.0) else 1
             orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             raw_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 300
             total_frames = max(1, raw_total_frames // frame_step)
 
             target_w, target_h = orig_w, orig_h
-            if orig_w > 1280 or orig_h > 1280:
-                scale = 1280.0 / max(orig_w, orig_h)
+            max_res = 768 if is_diffusion else 1280
+            if orig_w > max_res or orig_h > max_res:
+                scale = float(max_res) / max(orig_w, orig_h)
                 target_w = int(orig_w * scale)
                 target_h = int(orig_h * scale)
 
@@ -2272,8 +2274,16 @@ class MisrememberedDesktopApp(ctk.CTk):
             raw_idx = 0
             start_t = time.time()
 
-            self.add_log(f"Reconstruction Export: {orig_w}x{orig_h} ({raw_fps:.1f}fps) -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
-            dbg(f"Video Export started: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f}fps (step={frame_step}), total={total_frames}", "EXPORT")
+            if is_diffusion:
+                est_seconds = int(total_frames * 0.45) # ~0.45s per frame on CUDA
+                self.add_log(f"AI Diffusion Video Export Enabled: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames).", "alert")
+                self.add_log(f"Notice: AI neural diffusion is running per-frame. This will take a while (Estimated: ~{est_seconds // 60}m {est_seconds % 60}s)...", "warn")
+                dbg(f"AI Diffusion Video Export started: {target_w}x{target_h} @ {fps:.1f}fps, total={total_frames}, est={est_seconds}s", "EXPORT")
+            else:
+                self.add_log(f"Reconstruction Export: {orig_w}x{orig_h} ({raw_fps:.1f}fps) -> {target_w}x{target_h} @ {fps:.1f} FPS ({total_frames} frames)...", "alert")
+                dbg(f"Video Export started: {orig_w}x{orig_h} -> {target_w}x{target_h} @ {fps:.1f}fps (step={frame_step}), total={total_frames}", "EXPORT")
+
+            log_interval = 5 if is_diffusion else 30
 
             while cap.isOpened():
                 ret, frame = cap.read()
@@ -2297,14 +2307,15 @@ class MisrememberedDesktopApp(ctk.CTk):
                 writer.write(out)
                 frame_idx += 1
 
-                if frame_idx % 30 == 0:
+                if frame_idx % log_interval == 0 or frame_idx == total_frames:
                     prog = frame_idx / float(total_frames)
                     elapsed = time.time() - start_t
                     cur_fps = frame_idx / max(0.001, elapsed)
                     eta = int((total_frames - frame_idx) / max(0.1, cur_fps))
-                    self.after(0, lambda p=prog, i=frame_idx, tot=total_frames, f=cur_fps, e=eta: (
+                    eta_str = f"{eta // 60}m {eta % 60}s" if eta >= 60 else f"{eta}s"
+                    self.after(0, lambda p=prog, i=frame_idx, tot=total_frames, f=cur_fps, e=eta_str: (
                         self.progress_bar.set(p),
-                        self.add_log(f"Frame {i}/{tot} ({int(p*100)}%) — {f:.1f} FPS — ETA {e}s")
+                        self.add_log(f"Frame {i}/{tot} ({int(p*100)}%) — {f:.2f} FPS — ETA {e}")
                     ))
 
             cap.release()
