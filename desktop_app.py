@@ -21,12 +21,49 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.5.3-FULL-PIPELINE"
+APP_VERSION = "v4.6.0-AI-DIFFUSION"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXTERNAL DEBUG TERMINAL
-# Opens a separate PowerShell window showing live debug output in real-time.
+# SYSTEM TELEMETRY & HARDWARE MONITORING
 # ─────────────────────────────────────────────────────────────────────────────
+def get_system_memory_status():
+    """Returns (ram_total_gb, ram_avail_gb, ram_load_pct, vram_info_str)."""
+    ram_total, ram_avail, ram_load = 16.0, 8.0, 50
+    try:
+        import ctypes
+        class _MS(ctypes.Structure):
+            _fields_ = [
+                ('l', ctypes.c_ulong), ('load', ctypes.c_ulong),
+                ('t_phys', ctypes.c_ulonglong), ('a_phys', ctypes.c_ulonglong),
+                ('t_page', ctypes.c_ulonglong), ('a_page', ctypes.c_ulonglong),
+                ('t_virt', ctypes.c_ulonglong), ('a_virt', ctypes.c_ulonglong),
+                ('a_ext', ctypes.c_ulonglong)
+            ]
+        m = _MS()
+        m.l = ctypes.sizeof(_MS)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+            ram_total = round(m.t_phys / (1024 ** 3), 1)
+            ram_avail = round(m.a_phys / (1024 ** 3), 1)
+            ram_load = int(m.load)
+    except Exception:
+        pass
+
+    vram_str = "VRAM: N/A"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dev = torch.cuda.current_device()
+            dev_name = torch.cuda.get_device_name(dev)
+            v_total = round(torch.cuda.get_device_properties(dev).total_memory / (1024 ** 3), 1)
+            v_alloc = round(torch.cuda.memory_allocated(dev) / (1024 ** 3), 1)
+            vram_str = f"GPU: {dev_name} [{v_alloc}/{v_total}GB]"
+        else:
+            vram_str = "GPU: CPU MODE"
+    except Exception:
+        pass
+
+    return ram_total, ram_avail, ram_load, vram_str
+
 _DEBUG_LOG = os.path.join(tempfile.gettempdir(), "misremembered_debug.log")
 _dbg_lock = threading.Lock()
 
@@ -1379,7 +1416,140 @@ class NoclippingEffect:
             if feather_r < rh:
                 out[y0 + feather_r:y1, :] = static[feather_r:, :]
 
-        return out
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. BACKROOMS EXPERIMENTAL AI DIFFUSION ENGINE
+# Uses locally trained Stable Diffusion 1.5 + LoRA weights from
+# C:\Users\rucki\Downloads\misremembered-diffusion-1.5
+# ─────────────────────────────────────────────────────────────────────────────
+class BackroomsDiffusionEngine:
+    _pipe = None
+    _is_loading = False
+    _lock = threading.Lock()
+    DEFAULT_MODEL_DIR = r"C:\Users\rucki\Downloads\misremembered-diffusion-1.5"
+
+    @classmethod
+    def is_available(cls):
+        try:
+            import torch
+            import diffusers
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def load_pipeline(cls, model_dir=None, progress_cb=None):
+        if cls._pipe is not None:
+            return cls._pipe
+
+        with cls._lock:
+            if cls._pipe is not None:
+                return cls._pipe
+            cls._is_loading = True
+            try:
+                import torch
+                from diffusers import StableDiffusionImg2ImgPipeline, EulerAncestralDiscreteScheduler
+
+                target_dir = model_dir or cls.DEFAULT_MODEL_DIR
+                lora_path = os.path.join(target_dir, "pytorch_lora_weights.safetensors")
+                if not os.path.exists(lora_path):
+                    cand = glob.glob(os.path.join(target_dir, "*.safetensors"))
+                    if cand:
+                        lora_path = cand[0]
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                dtype = torch.float16 if device == "cuda" else torch.float32
+
+                if progress_cb:
+                    progress_cb("Loading base SD 1.5 pipeline...")
+                dbg(f"Loading Base SD 1.5 on {device} ({dtype})...", "AI_DIFF")
+
+                pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+                    "runwayml/stable-diffusion-v1-5",
+                    torch_dtype=dtype,
+                    safety_checker=None
+                )
+                pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+
+                if device == "cuda":
+                    pipe = pipe.to("cuda")
+                    pipe.enable_attention_slicing()
+
+                if os.path.exists(lora_path):
+                    if progress_cb:
+                        progress_cb(f"Injecting LoRA: {os.path.basename(lora_path)}...")
+                    dbg(f"Injecting LoRA weights from {lora_path}...", "AI_DIFF")
+                    pipe.load_lora_weights(os.path.dirname(lora_path), weight_name=os.path.basename(lora_path))
+                    dbg("LoRA injected successfully into UNet/TextEncoder!", "AI_DIFF")
+
+                cls._pipe = pipe
+                return cls._pipe
+            except Exception as e:
+                dbg(f"Failed to load diffusion pipeline: {e}", "AI_DIFF_ERROR")
+                raise e
+            finally:
+                cls._is_loading = False
+
+    @classmethod
+    def reconstruct_frame(cls, bgr_img, strength=0.54, guidance_scale=7.5, lora_scale=0.88, steps=20, prompt=None, neg_prompt=None):
+        if cls._pipe is None:
+            cls.load_pipeline()
+
+        import torch
+        pipe = cls._pipe
+        h, w = bgr_img.shape[:2]
+
+        # Convert OpenCV BGR to PIL Image
+        rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+        pil_init = Image.fromarray(rgb)
+
+        # Scale maintaining aspect ratio, capped at 768px for fast inference
+        MAX_DIM = 768
+        scale = min(1.0, MAX_DIM / max(w, h))
+        target_w = max(64, int(round(w * scale / 64) * 64))
+        target_h = max(64, int(round(h * scale / 64) * 64))
+        init_sd = pil_init.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+        p = prompt or (
+            "anomalous 3D meme and room inside the complex, "
+            "corrupted mutated text, duplicated instanced letters and misspelled wrong words, "
+            "blurry smeared glyphs, misplaced letters trailing off, "
+            "a frozen still life human figure standing in the room, "
+            "physical anatomical still life sculpture with misplaced limbs and eyes, "
+            "floating trees, instanced duplicated furniture placed in wrong locations, "
+            "office chairs and tables severed and clipped halfway into the floor and walls, "
+            "broken physical geometry, backrooms-complex style"
+        )
+
+        np_prompt = neg_prompt or (
+            "perfect clean readable text, crisp typography, correctly spelled words, "
+            "painted illustration, painting, brush strokes, watercolor, 2d drawing, cartoon, "
+            "flat shading, smooth clay smear, white haze, overexposed, washed out colors"
+        )
+
+        with torch.inference_mode():
+            try:
+                res_pil = pipe(
+                    prompt=p,
+                    negative_prompt=np_prompt,
+                    image=init_sd,
+                    strength=float(strength),
+                    guidance_scale=float(guidance_scale),
+                    num_inference_steps=int(steps),
+                    cross_attention_kwargs={"scale": float(lora_scale)}
+                ).images[0]
+            except Exception:
+                res_pil = pipe(
+                    prompt=p,
+                    negative_prompt=np_prompt,
+                    image=init_sd,
+                    strength=float(strength),
+                    guidance_scale=float(guidance_scale),
+                    num_inference_steps=int(steps)
+                ).images[0]
+
+        # Resize back to exact original frame dimensions and convert to BGR
+        res_full = res_pil.resize((w, h), Image.Resampling.LANCZOS)
+        return cv2.cvtColor(np.array(res_full), cv2.COLOR_RGB2BGR)
 
 
 
@@ -1632,6 +1802,24 @@ class MisrememberedEngine:
         if master_v > 0.25:
             out = GenerationalDegradation.apply(out, rng, intensity=master_v * 0.55)
 
+        # ── EXPERIMENTAL AI DIFFUSION ENGINE (if enabled) ──
+        use_diff = sliders.get("use_diffusion", 0) == 1
+        if use_diff and BackroomsDiffusionEngine.is_available():
+            try:
+                diff_str = sliders.get("diff_strength", 54) / 100.0
+                diff_lora = sliders.get("diff_lora_scale", 85) / 100.0
+                diff_guid = sliders.get("diff_guidance", 75) / 10.0
+                diff_steps = sliders.get("diff_steps", 20)
+                out = BackroomsDiffusionEngine.reconstruct_frame(
+                    out,
+                    strength=diff_str,
+                    guidance_scale=diff_guid,
+                    lora_scale=diff_lora,
+                    steps=diff_steps
+                )
+            except Exception as e:
+                dbg(f"Diffusion processing failed on frame: {e}", "AI_DIFF_WARN")
+
         # ── KANE PIXELS "FORGETS" TEXT CORRUPTOR SUITE (both) ──
         if text_v > 0.05:
             out = LocalGlyphCorruptor.corrupt_actual_frame_text(
@@ -1716,11 +1904,16 @@ class MisrememberedDesktopApp(ctk.CTk):
         seed_box = ctk.CTkFrame(self.header, fg_color="transparent")
         seed_box.pack(side="right", padx=20, pady=12)
 
+        self.telemetry_lbl = ctk.CTkLabel(seed_box, text="RAM: -- / -- GB", font=ctk.CTkFont(family="Courier New", size=10), text_color="#00ff66", fg_color="#181a20", corner_radius=4, padx=8, pady=2)
+        self.telemetry_lbl.pack(side="left", padx=8)
+
         self.seed_btn = ctk.CTkButton(seed_box, text="↻ RE-SEED", font=ctk.CTkFont(family="Courier New", size=11), width=90, height=28, fg_color="#181a20", hover_color="#262a36", border_width=1, border_color="#2e3444", text_color="#00ff66", command=self.re_seed)
         self.seed_btn.pack(side="left", padx=6)
 
         self.seed_lbl = ctk.CTkLabel(seed_box, text=f"SEED: {self.engine.seed:08X}", font=ctk.CTkFont(family="Courier New", size=11), text_color="#9ca3af")
         self.seed_lbl.pack(side="left", padx=6)
+
+        self._update_telemetry_loop()
 
         # ── BOTTOM EXPORT BAR ──
         self.bottom_bar = ctk.CTkFrame(self, height=64, fg_color="#0d0f14", corner_radius=0, border_width=1, border_color="#1f232e")
@@ -1747,6 +1940,7 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.tab_anatomy = self.tabs.add("2023 STILL LIFE")
+        self.tab_diffusion = self.tabs.add("AI DIFFUSION")
         self.tab_text = self.tabs.add("FORGETS TEXT")
         self.tab_audio = self.tabs.add("KANE AUDIO")
 
@@ -1810,6 +2004,30 @@ class MisrememberedDesktopApp(ctk.CTk):
         for title, key, mn, mx, df, clr in sliders_1:
             self._make_slider_group(self.tab_anatomy, title, key, mn, mx, df, clr)
 
+        # ── AI DIFFUSION TAB (EXPERIMENTAL SD 1.5 + LORA) ──
+        diff_switch_frame = ctk.CTkFrame(self.tab_diffusion, fg_color="#181c26", corner_radius=6, border_width=1, border_color="#2b3242")
+        diff_switch_frame.pack(fill="x", pady=(2, 8), padx=2)
+
+        self.diffusion_switch = ctk.CTkSwitch(
+            diff_switch_frame, text="EXPERIMENTAL AI DIFFUSION", font=ctk.CTkFont(family="Courier New", size=12, weight="bold"),
+            progress_color="#00ff66", button_color="#ffffff", text_color="#00ff66",
+            command=self.toggle_diffusion
+        )
+        self.diffusion_switch.pack(side="top", anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkLabel(diff_switch_frame, text="misremembered-diffusion-1.5 LoRA model", font=ctk.CTkFont(family="Courier New", size=9), text_color="#9ca3af").pack(side="top", anchor="w", padx=10, pady=(0, 8))
+
+        self.diff_status_lbl = ctk.CTkLabel(self.tab_diffusion, text="MODEL: C:\\Users\\...\\misremembered-diffusion-1.5", font=ctk.CTkFont(family="Courier New", size=9), text_color="#6b7280")
+        self.diff_status_lbl.pack(anchor="w", padx=4, pady=(0, 4))
+
+        diff_sliders = [
+            ("Diffusion Img2Img Strength", "diff_strength", 10, 90, 54, "#ff3344"),
+            ("LoRA Weight Scale", "diff_lora_scale", 10, 100, 85, "#00ff66"),
+            ("Guidance Scale (CFG)", "diff_guidance", 30, 150, 75, "#ff3344"),
+            ("Inference Steps (EulerA)", "diff_steps", 10, 50, 20, "#00ff66"),
+        ]
+        for title, key, mn, mx, df, clr in diff_sliders:
+            self._make_slider_group(self.tab_diffusion, title, key, mn, mx, df, clr)
+
         sliders_2 = [
             ("Forgets Glyph Corruption Intensity", "poster_melt", 0, 100, 90, "#ff3344"),
         ]
@@ -1841,7 +2059,45 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.slider_vars[key] = slider
 
     def get_sliders(self):
-        return {k: int(v.get()) for k, v in self.slider_vars.items()}
+        d = {k: int(v.get()) for k, v in self.slider_vars.items()}
+        d["use_diffusion"] = 1 if (hasattr(self, 'diffusion_switch') and self.diffusion_switch.get() == 1) else 0
+        return d
+
+    def _update_telemetry_loop(self):
+        try:
+            total_r, avail_r, load_pct, vram_info = get_system_memory_status()
+            used_r = round(total_r - avail_r, 1)
+            self.telemetry_lbl.configure(text=f"RAM: {used_r}/{total_r}GB ({load_pct}%) | {vram_info}")
+        except Exception:
+            pass
+        self.after(2000, self._update_telemetry_loop)
+
+    def toggle_diffusion(self):
+        use_diff = self.diffusion_switch.get() == 1
+        if use_diff:
+            if not BackroomsDiffusionEngine.is_available():
+                messagebox.showwarning(
+                    "PyTorch / Diffusers Required",
+                    "The experimental AI Diffusion engine requires 'torch' and 'diffusers'.\n\n"
+                    "Install with: pip install torch torchvision diffusers transformers accelerate safetensors"
+                )
+                self.diffusion_switch.deselect()
+                return
+
+            self.add_log("Loading experimental Backrooms Diffusion 1.5 pipeline...", "alert")
+            threading.Thread(target=self._async_load_diffusion, daemon=True).start()
+        else:
+            self.add_log("AI Diffusion Engine disabled. Reverting to real-time procedural engine.", "info")
+            self.refresh_preview()
+
+    def _async_load_diffusion(self):
+        try:
+            BackroomsDiffusionEngine.load_pipeline(progress_cb=lambda m: self.add_log(m, "info"))
+            self.add_log("AI Diffusion Pipeline Ready in VRAM/RAM!", "info")
+            self.after(100, self.refresh_preview)
+        except Exception as e:
+            self.add_log(f"Diffusion load error: {e}", "warn")
+            self.after(100, self.diffusion_switch.deselect)
 
     def toggle_still_life(self):
         self.engine.use_still_life = self.still_life_switch.get() == 1
