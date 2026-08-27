@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.6-PURE-AI-MODE"
+APP_VERSION = "v4.6.7-INSTANT-IMAGE-EXPORT"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -1447,7 +1447,7 @@ class BackroomsDiffusionEngine:
             cls._is_loading = True
             try:
                 import torch
-                from diffusers import StableDiffusionImg2ImgPipeline, EulerAncestralDiscreteScheduler
+                from diffusers import StableDiffusionImg2ImgPipeline, DPMSolverMultistepScheduler
 
                 target_dir = model_dir or cls.DEFAULT_MODEL_DIR
                 lora_path = os.path.join(target_dir, "pytorch_lora_weights.safetensors")
@@ -1479,7 +1479,8 @@ class BackroomsDiffusionEngine:
                     token=hf_token,
                     safety_checker=None
                 )
-                pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+                # DPMSolverMultistepScheduler provides convergence in only 8-12 steps instead of 20-30 steps
+                pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True)
 
                 if device == "cuda":
                     pipe = pipe.to("cuda")
@@ -1517,7 +1518,7 @@ class BackroomsDiffusionEngine:
                 cls._is_loading = False
 
     @classmethod
-    def reconstruct_frame(cls, bgr_img, strength=0.55, guidance_scale=7.5, lora_scale=0.88, steps=15, prompt=None, neg_prompt=None):
+    def reconstruct_frame(cls, bgr_img, strength=0.54, guidance_scale=7.0, lora_scale=0.88, steps=8, prompt=None, neg_prompt=None):
         if cls._pipe is None:
             cls.load_pipeline()
 
@@ -2354,6 +2355,14 @@ class MisrememberedDesktopApp(ctk.CTk):
             if not out_path:
                 return
 
+            # If the image is already rendered and shown on screen, save it immediately without re-running inference!
+            if self.processed_image_bgr is not None:
+                cv2.imwrite(out_path, self.processed_image_bgr)
+                self.add_log(f"Saved current reconstructed image directly to: {os.path.basename(out_path)}", "info")
+                messagebox.showinfo("Export Complete", f"Saved reconstructed image to:\n{out_path}")
+                return
+
+            # Otherwise, run the background export
             self.is_processing = True
             self.export_btn.configure(state="disabled")
             self.progress_bar.set(0.1)
