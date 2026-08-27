@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.2-ON-DEMAND-DIFFUSION"
+APP_VERSION = "v4.6.3-DIFFUSION-FIXES"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -1457,7 +1457,16 @@ class BackroomsDiffusionEngine:
                         lora_path = cand[0]
 
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                dtype = torch.float16 if device == "cuda" else torch.float32
+                token_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hf_token.txt")
+                hf_token = os.environ.get("HF_TOKEN")
+                if not hf_token and os.path.exists(token_file):
+                    try:
+                        hf_token = open(token_file, "r", encoding="utf-8").read().strip()
+                    except Exception:
+                        pass
+                if hf_token:
+                    os.environ["HF_TOKEN"] = hf_token
+                os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
                 if progress_cb:
                     progress_cb("Loading base SD 1.5 pipeline...")
@@ -1466,6 +1475,7 @@ class BackroomsDiffusionEngine:
                 pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
                     "runwayml/stable-diffusion-v1-5",
                     torch_dtype=dtype,
+                    token=hf_token,
                     safety_checker=None
                 )
                 pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
@@ -1478,8 +1488,16 @@ class BackroomsDiffusionEngine:
                     if progress_cb:
                         progress_cb(f"Injecting LoRA: {os.path.basename(lora_path)}...")
                     dbg(f"Injecting LoRA weights from {lora_path}...", "AI_DIFF")
-                    pipe.load_lora_weights(os.path.dirname(lora_path), weight_name=os.path.basename(lora_path))
-                    dbg("LoRA injected successfully into UNet/TextEncoder!", "AI_DIFF")
+                    try:
+                        pipe.load_lora_weights(os.path.dirname(lora_path), weight_name=os.path.basename(lora_path))
+                        dbg("LoRA injected via diffusers loader!", "AI_DIFF")
+                    except Exception as lora_err:
+                        dbg(f"Standard LoRA loader notice: {lora_err}. Attempting direct safetensors injection...", "AI_DIFF")
+                        # Fallback: direct safetensors state_dict injection without peft requirement
+                        from safetensors.torch import load_file
+                        state_dict = load_file(lora_path)
+                        pipe.load_lora_weights(state_dict)
+                        dbg("LoRA injected via direct safetensors state_dict!", "AI_DIFF")
 
                 cls._pipe = pipe
                 return cls._pipe
@@ -2138,10 +2156,11 @@ class MisrememberedDesktopApp(ctk.CTk):
                 self.refresh_preview()
             ))
         except Exception as e:
-            self.add_log(f"Diffusion load error: {e}", "warn")
-            self.after(0, lambda: (
+            err_msg = str(e)
+            self.add_log(f"Diffusion load error: {err_msg}", "warn")
+            self.after(0, lambda em=err_msg: (
                 self.load_model_btn.configure(state="normal", text="⚡ LOAD MODEL INTO VRAM"),
-                self.diff_status_lbl.configure(text=f"ERROR: {e}", text_color="#ff3344"),
+                self.diff_status_lbl.configure(text=f"ERROR: {em[:35]}...", text_color="#ff3344"),
                 self.diffusion_switch.deselect()
             ))
 
