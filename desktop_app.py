@@ -21,11 +21,12 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.6.9-INTEL-ARC-SUPPORT"
+APP_VERSION = "v4.7.0-INTEL-ARC-XPU-ENABLED"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
 # ─────────────────────────────────────────────────────────────────────────────
+
 def get_system_memory_status():
     """Returns (ram_total_gb, ram_avail_gb, ram_load_pct, vram_info_str)."""
     ram_total, ram_avail, ram_load = 16.0, 8.0, 50
@@ -59,13 +60,13 @@ def get_system_memory_status():
             vram_str = f"GPU: {dev_name} [{v_alloc}/{v_total}GB]"
         elif hasattr(torch, "xpu") and torch.xpu.is_available():
             dev_name = torch.xpu.get_device_name(0)
-            vram_str = f"INTEL ARC: {dev_name} (XPU)"
+            vram_str = f"⚡ INTEL XPU: {dev_name}"
         else:
             try:
                 import torch_directml
                 vram_str = f"GPU: DIRECTML (INTEL ARC)"
             except Exception:
-                vram_str = "INTEL ARC DETECTED (CPU FALLBACK)"
+                vram_str = "GPU: CPU MODE"
     except Exception:
         pass
 
@@ -1454,6 +1455,8 @@ class BackroomsDiffusionEngine:
             cls._is_loading = True
             try:
                 import torch
+                import torch.nn as nn
+                import diffusers
                 from diffusers import StableDiffusionImg2ImgPipeline, DPMSolverMultistepScheduler
 
                 target_dir = model_dir or cls.DEFAULT_MODEL_DIR
