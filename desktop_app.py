@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.7.0-INTEL-ARC-XPU-ENABLED"
+APP_VERSION = "v4.7.1-LORA-V2-INTEGRATED"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -1427,13 +1427,16 @@ class NoclippingEffect:
 # ─────────────────────────────────────────────────────────────────────────────
 # 10. BACKROOMS EXPERIMENTAL AI DIFFUSION ENGINE
 # Uses locally trained Stable Diffusion 1.5 + LoRA weights from
-# C:\Users\rucki\Downloads\misremembered-diffusion-1.5
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. BACKROOMS AI DIFFUSION ENGINE (STABLE DIFFUSION 1.5 + BACKROOMS COMPLEX V2 LORA)
+# Loads SD 1.5 & injects backrooms_complex_v2.safetensors via Intel Arc XPU/CUDA/DirectML
 # ─────────────────────────────────────────────────────────────────────────────
 class BackroomsDiffusionEngine:
     _pipe = None
     _is_loading = False
     _lock = threading.Lock()
     DEFAULT_MODEL_DIR = r"C:\Users\rucki\Downloads\misremembered-diffusion-1.5"
+    DEFAULT_LORA_V2 = r"C:\Users\rucki\Downloads\backrooms_complex_v2.safetensors"
 
     @classmethod
     def is_available(cls):
@@ -1459,12 +1462,23 @@ class BackroomsDiffusionEngine:
                 import diffusers
                 from diffusers import StableDiffusionImg2ImgPipeline, DPMSolverMultistepScheduler
 
-                target_dir = model_dir or cls.DEFAULT_MODEL_DIR
-                lora_path = os.path.join(target_dir, "pytorch_lora_weights.safetensors")
-                if not os.path.exists(lora_path):
-                    cand = glob.glob(os.path.join(target_dir, "*.safetensors"))
-                    if cand:
-                        lora_path = cand[0]
+                # Prioritize backrooms_complex_v2.safetensors if available
+                lora_path = None
+                if os.path.exists(cls.DEFAULT_LORA_V2):
+                    lora_path = cls.DEFAULT_LORA_V2
+                else:
+                    target_dir = model_dir or cls.DEFAULT_MODEL_DIR
+                    cand_v2 = os.path.join(target_dir, "backrooms_complex_v2.safetensors")
+                    if os.path.exists(cand_v2):
+                        lora_path = cand_v2
+                    else:
+                        cand_default = os.path.join(target_dir, "pytorch_lora_weights.safetensors")
+                        if os.path.exists(cand_default):
+                            lora_path = cand_default
+                        else:
+                            cand = glob.glob(os.path.join(target_dir, "*.safetensors"))
+                            if cand:
+                                lora_path = cand[0]
 
                 device_type = "cpu"
                 dml_device = None
@@ -1528,20 +1542,20 @@ class BackroomsDiffusionEngine:
                     import torch
                     torch.set_num_threads(max(4, os.cpu_count() or 8))
 
-                if os.path.exists(lora_path):
+                if lora_path and os.path.exists(lora_path):
                     if progress_cb:
                         progress_cb(f"Injecting LoRA: {os.path.basename(lora_path)}...")
                     dbg(f"Injecting LoRA weights from {lora_path}...", "AI_DIFF")
                     try:
                         pipe.load_lora_weights(os.path.dirname(lora_path), weight_name=os.path.basename(lora_path))
-                        dbg("LoRA injected via diffusers loader!", "AI_DIFF")
+                        dbg(f"LoRA ({os.path.basename(lora_path)}) injected via diffusers loader!", "AI_DIFF")
                     except Exception as lora_err:
                         dbg(f"Standard LoRA loader notice: {lora_err}. Attempting direct safetensors injection...", "AI_DIFF")
                         # Fallback: direct safetensors state_dict injection without peft requirement
                         from safetensors.torch import load_file
                         state_dict = load_file(lora_path)
                         pipe.load_lora_weights(state_dict)
-                        dbg("LoRA injected via direct safetensors state_dict!", "AI_DIFF")
+                        dbg(f"LoRA ({os.path.basename(lora_path)}) injected via direct safetensors state_dict!", "AI_DIFF")
 
                 cls._pipe = pipe
                 return cls._pipe
@@ -1552,36 +1566,36 @@ class BackroomsDiffusionEngine:
                 cls._is_loading = False
 
     @classmethod
-    def reconstruct_frame(cls, bgr_img, strength=0.54, guidance_scale=7.0, lora_scale=0.88, steps=8, prompt=None, neg_prompt=None):
+    def reconstruct_frame(cls, bgr_img, strength=0.51, guidance_scale=6.4, lora_scale=0.70, steps=35, prompt=None, neg_prompt=None):
         if cls._pipe is None:
             cls.load_pipeline()
 
         import torch
         pipe = cls._pipe
         h, w = bgr_img.shape[:2]
-        device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Convert OpenCV BGR to PIL Image
         rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
         pil_init = Image.fromarray(rgb)
 
-        # On CPU, 384px computes ~4.5x faster per UNet pass than 512px with identical visual Backrooms features
-        MAX_DIM = 512 if device == "cuda" else 384
-        scale = min(1.0, MAX_DIM / max(w, h))
-        target_w = max(64, int(round(w * scale / 64) * 64))
-        target_h = max(64, int(round(h * scale / 64) * 64))
-        init_sd = pil_init.resize((target_w, target_h), Image.Resampling.BILINEAR)
+        # Scale so the minimum dimension aligns with 768px (multiples of 64 for UNet latent grid)
+        scale = 768.0 / min(w, h)
+        proc_w = max(64, int((w * scale) // 64 * 64))
+        proc_h = max(64, int((h * scale) // 64 * 64))
+        init_sd = pil_init.resize((proc_w, proc_h), Image.Resampling.BILINEAR)
 
-        # Concise 45-token prompt strictly within CLIP 77-token limit to ensure full attention weight on Backrooms style
         p = prompt or (
-            "backrooms-complex style, liminal space, instanced cloned furniture, "
-            "severed items clipped into floor and walls, still life sculpture, "
-            "distorted misspelled words and blurred trailing letters, 3d physical space"
+            "backrooms-complex style, liminal space, raw disposable-camera photograph, "
+            "harsh direct flash, film grain, non-euclidean spatial distortion, "
+            "warped ceiling geometry, shifted perspective, repeating doorways, "
+            "duplicate furniture, cascading instanced furniture, corrupted incorrect text, "
+            "uncanny, multiple limbs, multiple eyes, fluorescent lighting, stained carpet"
         )
 
         np_prompt = neg_prompt or (
-            "readable text, clean typography, correct spelling, "
-            "painting, 2d drawing, cartoon, flat clay smear, white haze, blurry canvas"
+            "painting, illustration, cartoon, 3d render, cgi, clay, plastic, "
+            "smoothed skin, airbrushed, blurry, lowres, oversaturated, vibrant, "
+            "clean, pristine, modern, legible text, watermark, logo"
         )
 
         with torch.inference_mode():
@@ -2098,10 +2112,10 @@ class MisrememberedDesktopApp(ctk.CTk):
         self.pure_ai_btn.pack(fill="x", padx=2, pady=(0, 6))
 
         diff_sliders = [
-            ("Diffusion Img2Img Strength", "diff_strength", 10, 90, 55, "#ff3344"),
-            ("LoRA Weight Scale", "diff_lora_scale", 10, 100, 88, "#00ff66"),
-            ("Guidance Scale (CFG)", "diff_guidance", 30, 150, 75, "#ff3344"),
-            ("Inference Steps (EulerA)", "diff_steps", 10, 50, 15, "#00ff66"),
+            ("Diffusion Img2Img Strength", "diff_strength", 20, 80, 51, "#ff3344"),
+            ("LoRA Weight Scale", "diff_lora_scale", 20, 100, 70, "#00ff66"),
+            ("Guidance Scale (CFG)", "diff_guidance", 30, 120, 64, "#ff3344"),
+            ("Inference Steps (DPM/Euler)", "diff_steps", 10, 50, 35, "#00ff66"),
         ]
         for title, key, mn, mx, df, clr in diff_sliders:
             self._make_slider_group(self.tab_diffusion, title, key, mn, mx, df, clr)
