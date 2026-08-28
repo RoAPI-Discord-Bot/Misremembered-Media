@@ -21,7 +21,7 @@ from tkinter import filedialog, messagebox
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
 
-APP_VERSION = "v4.7.1-LORA-V2-INTEGRATED"
+APP_VERSION = "v4.7.2-CLEAN-PROMPT-FAST-RES"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM TELEMETRY & HARDWARE MONITORING
@@ -1578,21 +1578,24 @@ class BackroomsDiffusionEngine:
         rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
         pil_init = Image.fromarray(rgb)
 
-        # Scale so the minimum dimension aligns with 768px (multiples of 64 for UNet latent grid)
-        scale = 768.0 / min(w, h)
+        # Downsample to 448px max dimension for fast generation speed while maintaining anomaly coherence
+        # (448px computes ~3x faster per UNet pass than 768px)
+        MAX_DIM = 448
+        scale = min(1.0, MAX_DIM / max(w, h)) if max(w, h) > MAX_DIM else 1.0
         proc_w = max(64, int((w * scale) // 64 * 64))
         proc_h = max(64, int((h * scale) // 64 * 64))
         init_sd = pil_init.resize((proc_w, proc_h), Image.Resampling.BILINEAR)
 
+        # Clean prompt without film grain, flash artifacts, or disposable camera references
         p = prompt or (
-            "backrooms-complex style, liminal space, raw disposable-camera photograph, "
-            "harsh direct flash, film grain, non-euclidean spatial distortion, "
+            "backrooms-complex style, liminal space, non-euclidean spatial distortion, "
             "warped ceiling geometry, shifted perspective, repeating doorways, "
             "duplicate furniture, cascading instanced furniture, corrupted incorrect text, "
-            "uncanny, multiple limbs, multiple eyes, fluorescent lighting, stained carpet"
+            "uncanny, multiple limbs, multiple eyes, fluorescent lighting, stained carpet, 3d physical space"
         )
 
         np_prompt = neg_prompt or (
+            "film grain, noisy, harsh flash, disposable camera glare, white specks, "
             "painting, illustration, cartoon, 3d render, cgi, clay, plastic, "
             "smoothed skin, airbrushed, blurry, lowres, oversaturated, vibrant, "
             "clean, pristine, modern, legible text, watermark, logo"
